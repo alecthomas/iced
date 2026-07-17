@@ -53,7 +53,8 @@ pub fn window_attributes(
         .with_blur(settings.blur)
         .with_window_icon(settings.icon.and_then(icon))
         .with_window_level(window_level(settings.level))
-        .with_visible(settings.visible);
+        .with_visible(settings.visible)
+        .with_active(settings.active);
 
     if let Some(position) = position(primary_monitor.as_ref(), settings.size, settings.position) {
         attributes = attributes.with_position(position);
@@ -143,6 +144,27 @@ pub fn window_attributes(
     }
 
     attributes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn window_activation_follows_settings() {
+        let attributes = window_attributes(
+            window::Settings {
+                active: false,
+                ..window::Settings::default()
+            },
+            "Test",
+            1.0,
+            None,
+            None,
+        );
+
+        assert!(!attributes.active);
+    }
 }
 
 /// Converts a winit window event into an iced event.
