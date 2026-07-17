@@ -77,9 +77,19 @@ where
     let settings = program.settings();
     let window_settings = program.window();
 
-    let event_loop = EventLoop::with_user_event()
-        .build()
-        .expect("Create event loop");
+    let mut event_loop = EventLoop::with_user_event();
+
+    #[cfg(target_os = "macos")]
+    {
+        use winit::platform::macos::EventLoopBuilderExtMacOS;
+
+        let active = window_settings
+            .as_ref()
+            .is_none_or(|settings| settings.active);
+        let _ = event_loop.with_activate_ignoring_other_apps(active);
+    }
+
+    let event_loop = event_loop.build().expect("Create event loop");
 
     let backend_settings = backend::Settings::from(&settings);
     let renderer_settings = renderer::Settings::from(&settings);
