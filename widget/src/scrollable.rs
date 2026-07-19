@@ -974,7 +974,16 @@ where
                         }
                     }
 
-                    let _ = notify_viewport(state, &self.on_scroll, bounds, content_bounds, shell);
+                    if state.notify_suppressed {
+                        // A silent programmatic scroll moved the offsets:
+                        // record the viewport as notified without echoing
+                        // `on_scroll` back to the application.
+                        state.notify_suppressed = false;
+                        let _ = notify_viewport(state, &None, bounds, content_bounds, shell);
+                    } else {
+                        let _ =
+                            notify_viewport(state, &self.on_scroll, bounds, content_bounds, shell);
+                    }
                 }
                 _ => {}
             }
@@ -1498,6 +1507,9 @@ struct State {
     last_notified: Option<Viewport>,
     last_scrolled: Option<Instant>,
     is_scrollbar_visible: bool,
+    /// Set by silent programmatic scrolls: the next redraw records the
+    /// viewport as notified without publishing `on_scroll`.
+    notify_suppressed: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1523,6 +1535,7 @@ impl Default for State {
             last_notified: None,
             last_scrolled: None,
             is_scrollbar_visible: true,
+            notify_suppressed: false,
         }
     }
 }
@@ -1534,6 +1547,11 @@ impl operation::Scrollable for State {
 
     fn scroll_to(&mut self, offset: AbsoluteOffset<Option<f32>>) {
         State::scroll_to(self, offset);
+    }
+
+    fn scroll_to_silent(&mut self, offset: AbsoluteOffset<Option<f32>>) {
+        State::scroll_to(self, offset);
+        self.notify_suppressed = true;
     }
 
     fn scroll_by(&mut self, offset: AbsoluteOffset, bounds: Rectangle, content_bounds: Rectangle) {
