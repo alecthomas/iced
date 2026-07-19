@@ -30,6 +30,17 @@ pub fn scroll_to<T>(id: impl Into<Id>, offset: impl Into<AbsoluteOffset<Option<f
     )))
 }
 
+/// Scrolls the scrollable with the given [`Id`] to the provided
+/// [`AbsoluteOffset`] without notifying its scroll callback. Use when the
+/// application already tracks the target offset and the callback would be
+/// a redundant update round trip.
+pub fn scroll_to_silent<T>(id: impl Into<Id>, offset: impl Into<AbsoluteOffset<Option<f32>>>) -> Task<T> {
+    task::effect(Action::widget(operation::scrollable::scroll_to_silent(
+        id.into(),
+        offset.into(),
+    )))
+}
+
 /// Scrolls the scrollable with the given [`Id`] by the provided [`AbsoluteOffset`].
 pub fn scroll_by<T>(id: impl Into<Id>, offset: AbsoluteOffset) -> Task<T> {
     task::effect(Action::widget(operation::scrollable::scroll_by(
