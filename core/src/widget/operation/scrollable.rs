@@ -10,6 +10,13 @@ pub trait Scrollable {
     /// Scroll the widget to the given [`AbsoluteOffset`] along the horizontal & vertical axis.
     fn scroll_to(&mut self, offset: AbsoluteOffset<Option<f32>>);
 
+    /// Like [`scroll_to`](Self::scroll_to), but without notifying the
+    /// widget's scroll callback. Use when the application already tracks
+    /// the target offset and a callback would be a redundant round trip.
+    fn scroll_to_silent(&mut self, offset: AbsoluteOffset<Option<f32>>) {
+        self.scroll_to(offset);
+    }
+
     /// Scroll the widget by the given [`AbsoluteOffset`] along the horizontal & vertical axis.
     fn scroll_by(&mut self, offset: AbsoluteOffset, bounds: Rectangle, content_bounds: Rectangle);
 }
@@ -72,6 +79,36 @@ pub fn scroll_to<T>(target: Id, offset: AbsoluteOffset<Option<f32>>) -> impl Ope
     }
 
     ScrollTo { target, offset }
+}
+
+/// Produces an [`Operation`] like [`scroll_to`], but without notifying the
+/// widget's scroll callback.
+pub fn scroll_to_silent<T>(target: Id, offset: AbsoluteOffset<Option<f32>>) -> impl Operation<T> {
+    struct ScrollToSilent {
+        target: Id,
+        offset: AbsoluteOffset<Option<f32>>,
+    }
+
+    impl<T> Operation<T> for ScrollToSilent {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<T>)) {
+            operate(self);
+        }
+
+        fn scrollable(
+            &mut self,
+            id: Option<&Id>,
+            _bounds: Rectangle,
+            _content_bounds: Rectangle,
+            _translation: Vector,
+            state: &mut dyn Scrollable,
+        ) {
+            if Some(&self.target) == id {
+                state.scroll_to_silent(self.offset);
+            }
+        }
+    }
+
+    ScrollToSilent { target, offset }
 }
 
 /// Produces an [`Operation`] that scrolls the widget with the given [`Id`] by
