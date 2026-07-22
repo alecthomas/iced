@@ -843,7 +843,9 @@ where
 
                 if let Some(focus) = &mut state.is_focused {
                     match key.to_latin(*physical_key) {
-                        Some('c') if *modifiers == keyboard::Modifiers::COMMAND && !self.is_secure => {
+                        Some('c')
+                            if *modifiers == keyboard::Modifiers::COMMAND && !self.is_secure =>
+                        {
                             if let Some((start, end)) = state.cursor.selection(&self.value) {
                                 shell.write_clipboard(clipboard::Content::Text(
                                     self.value.select(start, end).to_string(),
@@ -853,7 +855,9 @@ where
                             shell.capture_event();
                             return;
                         }
-                        Some('x') if *modifiers == keyboard::Modifiers::COMMAND && !self.is_secure => {
+                        Some('x')
+                            if *modifiers == keyboard::Modifiers::COMMAND && !self.is_secure =>
+                        {
                             let Some(on_input) = &self.on_input else {
                                 return;
                             };
@@ -922,30 +926,31 @@ where
                         _ => {}
                     }
 
-                    if let Some(text) = text {
+                    if let Some(c) =
+                        crate::text_editor::insertable_character(key, *modifiers, text.as_deref())
+                    {
                         let Some(on_input) = &self.on_input else {
                             return;
                         };
 
                         state.is_pasting = None;
 
-                        if let Some(c) = text.chars().next().filter(|c| !c.is_control()) {
-                            let mut editor = Editor::new(&mut self.value, &mut state.cursor);
+                        let mut editor = Editor::new(&mut self.value, &mut state.cursor);
 
-                            editor.insert(c);
+                        editor.insert(c);
 
-                            let message = (on_input)(editor.contents());
-                            shell.publish(message);
-                            shell.capture_event();
+                        let message = (on_input)(editor.contents());
+                        shell.publish(message);
+                        shell.capture_event();
 
-                            focus.updated_at = Instant::now();
-                            update_cache(state, &self.value);
-                            return;
-                        }
+                        focus.updated_at = Instant::now();
+                        update_cache(state, &self.value);
+                        return;
                     }
 
                     #[cfg(target_os = "macos")]
-                    let macos_shortcut = crate::text_editor::convert_macos_shortcut(key, *modifiers);
+                    let macos_shortcut =
+                        crate::text_editor::convert_macos_shortcut(key, *modifiers);
 
                     #[cfg(target_os = "macos")]
                     let modified_key = macos_shortcut.as_ref().unwrap_or(modified_key);
