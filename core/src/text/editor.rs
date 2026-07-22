@@ -837,9 +837,7 @@ impl<Message> Binding<Message> {
             }
             keyboard::Key::Named(key::Named::Escape) => Some(Self::Unfocus),
             _ => {
-                if let Some(text) = text {
-                    let c = text.chars().find(|c| !c.is_control())?;
-
+                if let Some(c) = insertable_character(&key, modifiers, text.as_deref()) {
                     Some(Self::Insert(c))
                 } else if let keyboard::Key::Named(named_key) = modified_key.as_ref() {
                     let motion = motion(named_key)?;
@@ -870,6 +868,27 @@ impl<Message> Binding<Message> {
                 }
             }
         }
+    }
+}
+
+fn insertable_character(
+    key: &keyboard::Key,
+    modifiers: keyboard::Modifiers,
+    text: Option<&str>,
+) -> Option<char> {
+    let text = text?;
+    let character = text.chars().find(|character| !character.is_control())?;
+
+    if !modifiers.control() && !modifiers.alt() && !modifiers.logo() {
+        return Some(character);
+    }
+    if modifiers.logo() || (modifiers.control() && !modifiers.alt()) {
+        return None;
+    }
+
+    match key.as_ref() {
+        keyboard::Key::Character(key) if key.to_lowercase() == text.to_lowercase() => None,
+        _ => Some(character),
     }
 }
 
@@ -1010,6 +1029,22 @@ mod tests {
         Binding::from_key_press(key_press(keyboard::Key::Named(named), modifiers))
     }
 
+    fn modified_character(
+        key: &str,
+        modified_key: &str,
+        text: &str,
+        modifiers: keyboard::Modifiers,
+    ) -> Option<Binding<()>> {
+        Binding::from_key_press(KeyPress {
+            key: keyboard::Key::Character(key.into()),
+            modified_key: keyboard::Key::Character(modified_key.into()),
+            physical_key: key::Physical::Unidentified(key::NativeCode::Unidentified),
+            modifiers,
+            text: Some(text.into()),
+            is_focused: true,
+        })
+    }
+
     fn kill(motion: Motion, delete: Binding<()>) -> Option<Binding<()>> {
         Some(Binding::Sequence(vec![Binding::Select(motion), delete]))
     }
@@ -1037,6 +1072,48 @@ mod tests {
                 keyboard::Modifiers::COMMAND | keyboard::Modifiers::SHIFT
             ),
             Some(Binding::Copy)
+        );
+    }
+
+    #[test]
+    fn unhandled_modifier_chords_do_not_insert_raw_keys() {
+        assert_eq!(
+            modified_character(
+                "a",
+                "A",
+                "a",
+                keyboard::Modifiers::LOGO | keyboard::Modifiers::SHIFT
+            ),
+            None
+        );
+        assert_eq!(
+            modified_character("l", "l", "l", keyboard::Modifiers::ALT),
+            None
+        );
+        assert_eq!(
+            modified_character("z", "z", "z", keyboard::Modifiers::CTRL),
+            None
+        );
+    }
+
+    #[test]
+    fn text_producing_modifiers_remain_insertable() {
+        assert_eq!(
+            modified_character("a", "A", "A", keyboard::Modifiers::SHIFT),
+            Some(Binding::Insert('A'))
+        );
+        assert_eq!(
+            modified_character("l", "¬", "¬", keyboard::Modifiers::ALT),
+            Some(Binding::Insert('¬'))
+        );
+        assert_eq!(
+            modified_character(
+                "q",
+                "@",
+                "@",
+                keyboard::Modifiers::CTRL | keyboard::Modifiers::ALT
+            ),
+            Some(Binding::Insert('@'))
         );
     }
 
