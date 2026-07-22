@@ -800,14 +800,15 @@ impl<Message> Binding<Message> {
         }
 
         let combination = match key.to_latin(physical_key) {
-            Some('c') if modifiers.command() => Some(Self::Copy),
-            Some('x') if modifiers.command() => Some(Self::Cut),
-            Some('v') if modifiers.command() && !modifiers.alt() => Some(Self::Paste),
-            Some('a') if modifiers.command() => Some(Self::SelectAll),
-            Some('z') if modifiers.command() => Some(Self::Undo),
-            Some('y') if modifiers.command() => Some(Self::Redo),
+            Some('c') if modifiers == keyboard::Modifiers::COMMAND => Some(Self::Copy),
+            Some('x') if modifiers == keyboard::Modifiers::COMMAND => Some(Self::Cut),
+            Some('v') if modifiers == keyboard::Modifiers::COMMAND => Some(Self::Paste),
+            Some('a') if modifiers == keyboard::Modifiers::COMMAND => Some(Self::SelectAll),
+            Some('z') if modifiers == keyboard::Modifiers::COMMAND => Some(Self::Undo),
+            Some('y') if modifiers == keyboard::Modifiers::COMMAND => Some(Self::Redo),
             _ => None,
-        };
+        }
+        .or_else(|| emacs_kill(&key, physical_key, modifiers));
 
         if let Some(binding) = combination {
             return Some(binding);
@@ -818,11 +819,21 @@ impl<Message> Binding<Message> {
 
         match modified_key.as_ref() {
             keyboard::Key::Named(key::Named::Enter) => Some(Self::Enter),
-            keyboard::Key::Named(key::Named::Backspace) => Some(Self::Backspace),
+            keyboard::Key::Named(key::Named::Backspace) => Some(delete_by(
+                modifiers,
+                Motion::WordLeft,
+                Motion::Home,
+                Self::Backspace,
+            )),
             keyboard::Key::Named(key::Named::Delete)
                 if text.is_none() || text.as_deref() == Some("\u{7f}") =>
             {
-                Some(Self::Delete)
+                Some(delete_by(
+                    modifiers,
+                    Motion::WordRight,
+                    Motion::End,
+                    Self::Delete,
+                ))
             }
             keyboard::Key::Named(key::Named::Escape) => Some(Self::Unfocus),
             _ => {
@@ -830,7 +841,7 @@ impl<Message> Binding<Message> {
                     let c = text.chars().find(|c| !c.is_control())?;
 
                     Some(Self::Insert(c))
-                } else if let keyboard::Key::Named(named_key) = key.as_ref() {
+                } else if let keyboard::Key::Named(named_key) = modified_key.as_ref() {
                     let motion = motion(named_key)?;
 
                     let motion = if modifiers.macos_command() {
@@ -860,6 +871,52 @@ impl<Message> Binding<Message> {
             }
         }
     }
+}
+
+fn delete_by<Message>(
+    modifiers: keyboard::Modifiers,
+    word: Motion,
+    line: Motion,
+    grapheme: Binding<Message>,
+) -> Binding<Message> {
+    let motion = if modifiers.macos_command() {
+        line
+    } else if modifiers.jump() {
+        word
+    } else {
+        return grapheme;
+    };
+
+    Binding::Sequence(vec![Binding::Select(motion), grapheme])
+}
+
+#[cfg(target_os = "macos")]
+fn emacs_kill<Message>(
+    key: &keyboard::Key,
+    physical_key: keyboard::key::Physical,
+    modifiers: keyboard::Modifiers,
+) -> Option<Binding<Message>> {
+    if modifiers != keyboard::Modifiers::CTRL {
+        return None;
+    }
+
+    let (motion, delete) = match key.to_latin(physical_key) {
+        Some('k') => (Motion::End, Binding::Delete),
+        Some('u') => (Motion::Home, Binding::Backspace),
+        Some('w') => (Motion::WordLeft, Binding::Backspace),
+        _ => return None,
+    };
+
+    Some(Binding::Sequence(vec![Binding::Select(motion), delete]))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn emacs_kill<Message>(
+    _key: &keyboard::Key,
+    _physical_key: keyboard::key::Physical,
+    _modifiers: keyboard::Modifiers,
+) -> Option<Binding<Message>> {
+    None
 }
 
 /// The update of an [`Editor`], returned by [`State::update`].
@@ -914,12 +971,145 @@ fn convert_macos_shortcut(
         keyboard::Key::Character("f") => key::Named::ArrowRight,
         keyboard::Key::Character("a") => key::Named::Home,
         keyboard::Key::Character("e") => key::Named::End,
+        keyboard::Key::Character("p") => key::Named::ArrowUp,
+        keyboard::Key::Character("n") => key::Named::ArrowDown,
         keyboard::Key::Character("h") => key::Named::Backspace,
         keyboard::Key::Character("d") => key::Named::Delete,
         _ => return None,
     };
 
     Some(keyboard::Key::Named(key))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key_press(key: keyboard::Key, modifiers: keyboard::Modifiers) -> KeyPress {
+        KeyPress {
+            key: key.clone(),
+            modified_key: key,
+            physical_key: key::Physical::Unidentified(key::NativeCode::Unidentified),
+            modifiers,
+            text: None,
+            is_focused: true,
+        }
+    }
+
+    fn character(
+        character: &str,
+        modifiers: keyboard::Modifiers,
+    ) -> Option<Binding<()>> {
+        Binding::from_key_press(key_press(
+            keyboard::Key::Character(character.into()),
+            modifiers,
+        ))
+    }
+
+    fn named(named: key::Named, modifiers: keyboard::Modifiers) -> Option<Binding<()>> {
+        Binding::from_key_press(key_press(keyboard::Key::Named(named), modifiers))
+    }
+
+    fn kill(motion: Motion, delete: Binding<()>) -> Option<Binding<()>> {
+        Some(Binding::Sequence(vec![Binding::Select(motion), delete]))
+    }
+
+    #[test]
+    fn command_shortcuts_require_exact_modifiers() {
+        assert_eq!(
+            character("a", keyboard::Modifiers::COMMAND),
+            Some(Binding::SelectAll)
+        );
+        assert_eq!(
+            character("c", keyboard::Modifiers::COMMAND),
+            Some(Binding::Copy)
+        );
+        assert_ne!(
+            character(
+                "a",
+                keyboard::Modifiers::COMMAND | keyboard::Modifiers::SHIFT
+            ),
+            Some(Binding::SelectAll)
+        );
+        assert_ne!(
+            character(
+                "c",
+                keyboard::Modifiers::COMMAND | keyboard::Modifiers::SHIFT
+            ),
+            Some(Binding::Copy)
+        );
+    }
+
+    #[test]
+    fn plain_backspace_deletes_grapheme() {
+        assert_eq!(
+            named(key::Named::Backspace, keyboard::Modifiers::empty()),
+            Some(Binding::Backspace)
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn word_and_line_deletion() {
+        assert_eq!(
+            named(key::Named::Backspace, keyboard::Modifiers::ALT),
+            kill(Motion::WordLeft, Binding::Backspace)
+        );
+        assert_eq!(
+            named(key::Named::Backspace, keyboard::Modifiers::COMMAND),
+            kill(Motion::Home, Binding::Backspace)
+        );
+        assert_eq!(
+            named(key::Named::Delete, keyboard::Modifiers::ALT),
+            kill(Motion::WordRight, Binding::Delete)
+        );
+        assert_eq!(
+            named(key::Named::Delete, keyboard::Modifiers::COMMAND),
+            kill(Motion::End, Binding::Delete)
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_emacs_bindings() {
+        assert_eq!(
+            character("k", keyboard::Modifiers::CTRL),
+            kill(Motion::End, Binding::Delete)
+        );
+        assert_eq!(
+            character("u", keyboard::Modifiers::CTRL),
+            kill(Motion::Home, Binding::Backspace)
+        );
+        assert_eq!(
+            character("w", keyboard::Modifiers::CTRL),
+            kill(Motion::WordLeft, Binding::Backspace)
+        );
+
+        assert_eq!(
+            character("a", keyboard::Modifiers::CTRL),
+            Some(Binding::Move(Motion::Home))
+        );
+        assert_eq!(
+            character("e", keyboard::Modifiers::CTRL),
+            Some(Binding::Move(Motion::End))
+        );
+        assert_eq!(
+            character("b", keyboard::Modifiers::CTRL),
+            Some(Binding::Move(Motion::Left))
+        );
+        assert_eq!(
+            character("f", keyboard::Modifiers::CTRL),
+            Some(Binding::Move(Motion::Right))
+        );
+        assert_eq!(
+            character("p", keyboard::Modifiers::CTRL),
+            Some(Binding::Move(Motion::Up))
+        );
+        assert_eq!(
+            character("n", keyboard::Modifiers::CTRL),
+            Some(Binding::Move(Motion::Down))
+        );
+    }
 }
 
 impl<T: Editor> TextInput for T {
