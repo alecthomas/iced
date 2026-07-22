@@ -843,7 +843,7 @@ where
 
                 if let Some(focus) = &mut state.is_focused {
                     match key.to_latin(*physical_key) {
-                        Some('c') if modifiers.command() && !self.is_secure => {
+                        Some('c') if *modifiers == keyboard::Modifiers::COMMAND && !self.is_secure => {
                             if let Some((start, end)) = state.cursor.selection(&self.value) {
                                 shell.write_clipboard(clipboard::Content::Text(
                                     self.value.select(start, end).to_string(),
@@ -853,7 +853,7 @@ where
                             shell.capture_event();
                             return;
                         }
-                        Some('x') if modifiers.command() && !self.is_secure => {
+                        Some('x') if *modifiers == keyboard::Modifiers::COMMAND && !self.is_secure => {
                             let Some(on_input) = &self.on_input else {
                                 return;
                             };
@@ -875,10 +875,7 @@ where
                             update_cache(state, &self.value);
                             return;
                         }
-                        Some('v')
-                            if modifiers.command()
-                                && !modifiers.alt() =>
-                        {
+                        Some('v') if *modifiers == keyboard::Modifiers::COMMAND => {
                             let Some(on_input) = &self.on_input else {
                                 return;
                             };
@@ -908,7 +905,7 @@ where
                             update_cache(state, &self.value);
                             return;
                         }
-                        Some('a') if modifiers.command() => {
+                        Some('a') if *modifiers == keyboard::Modifiers::COMMAND => {
                             let cursor_before = state.cursor;
 
                             state.cursor.select_all(&self.value);
