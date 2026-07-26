@@ -60,6 +60,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 pub use core::text::Highlight;
+#[cfg(feature = "highlighter")]
+pub use iced_highlighter::Theme as HighlighterTheme;
 pub use pulldown_cmark::HeadingLevel;
 
 /// A [`String`] representing a [URI] in a Markdown document
@@ -90,6 +92,20 @@ impl Content {
     /// Creates some new [`Content`] by parsing the given Markdown.
     pub fn parse(markdown: &str) -> Self {
         let mut content = Self::new();
+        content.push_str(markdown);
+        content
+    }
+
+    /// Parses Markdown using the given syntax highlighting theme.
+    #[cfg(feature = "highlighter")]
+    pub fn parse_with_highlighter(markdown: &str, theme: HighlighterTheme) -> Self {
+        let mut content = Self {
+            state: State {
+                highlighter_theme: theme,
+                ..State::default()
+            },
+            ..Self::default()
+        };
         content.push_str(markdown);
         content
     }
@@ -153,6 +169,8 @@ impl Content {
                         images: HashSet::new(),
                         #[cfg(feature = "highlighter")]
                         highlighter: None,
+                        #[cfg(feature = "highlighter")]
+                        highlighter_theme: self.state.highlighter_theme,
                     };
 
                     if let Some((item, _source, _broken_links)) =
@@ -423,13 +441,29 @@ pub fn parse(markdown: &str) -> impl Iterator<Item = Item> + '_ {
     parse_with(State::default(), markdown).map(|(item, _source, _broken_links)| item)
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct State {
     leftover: String,
     references: HashMap<String, String>,
     images: HashSet<Uri>,
     #[cfg(feature = "highlighter")]
     highlighter: Option<Highlighter>,
+    #[cfg(feature = "highlighter")]
+    highlighter_theme: HighlighterTheme,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            leftover: String::new(),
+            references: HashMap::new(),
+            images: HashSet::new(),
+            #[cfg(feature = "highlighter")]
+            highlighter: None,
+            #[cfg(feature = "highlighter")]
+            highlighter_theme: HighlighterTheme::Base16Ocean,
+        }
+    }
 }
 
 #[cfg(feature = "highlighter")]
@@ -443,11 +477,11 @@ struct Highlighter {
 
 #[cfg(feature = "highlighter")]
 impl Highlighter {
-    pub fn new(language: &str) -> Self {
+    pub fn new(language: &str, theme: HighlighterTheme) -> Self {
         Self {
             lines: Vec::new(),
             parser: iced_highlighter::Stream::new(&iced_highlighter::Settings {
-                theme: iced_highlighter::Theme::Base16Ocean,
+                theme,
                 token: language.to_owned(),
             }),
             language: language.to_owned(),
@@ -681,6 +715,7 @@ fn parse_with<'a>(
             {
                 #[cfg(feature = "highlighter")]
                 {
+                    let theme = state.borrow_mut().highlighter_theme;
                     highlighter = Some({
                         let mut highlighter = state
                             .borrow_mut()
@@ -688,7 +723,10 @@ fn parse_with<'a>(
                             .take()
                             .filter(|highlighter| highlighter.language == language.as_ref())
                             .unwrap_or_else(|| {
-                                Highlighter::new(language.split(',').next().unwrap_or_default())
+                                Highlighter::new(
+                                    language.split(',').next().unwrap_or_default(),
+                                    theme,
+                                )
                             });
 
                         highlighter.prepare();
@@ -1648,6 +1686,52 @@ pub trait Catalog:
 
 impl Catalog for Theme {
     fn code_block<'a>() -> <Self as container::Catalog>::Class<'a> {
-        Box::new(container::dark)
+        Box::new(container::rounded_box)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(feature = "highlighter")]
+    #[test]
+    fn configured_highlighter_theme_changes_code_colors() {
+        fn colors(content: &Content) -> Vec<Option<Color>> {
+            let Item::CodeBlock { lines, .. } = &content.items()[0] else {
+                panic!("expected code block");
+            };
+
+            lines
+                .iter()
+                .flat_map(|line| {
+                    line.spans(Style::from(Theme::Dark))
+                        .iter()
+                        .map(|span| span.color)
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        }
+
+        let markdown = "```json\n{\"cmd\": \"agent_prompt_files\"}\n```";
+        let dark = Content::parse_with_highlighter(markdown, HighlighterTheme::Base16Ocean);
+        let light = Content::parse_with_highlighter(markdown, HighlighterTheme::InspiredGitHub);
+
+        assert_ne!(colors(&dark), colors(&light));
+    }
+
+    #[test]
+    fn code_block_style_follows_theme() {
+        fn style(theme: &Theme) -> container::Style {
+            let class = <Theme as Catalog>::code_block();
+            <Theme as container::Catalog>::style(theme, &class)
+        }
+
+        assert_eq!(container::rounded_box(&Theme::Light), style(&Theme::Light));
+        assert_eq!(container::rounded_box(&Theme::Dark), style(&Theme::Dark));
+        assert_ne!(
+            style(&Theme::Light).background,
+            style(&Theme::Dark).background
+        );
     }
 }
