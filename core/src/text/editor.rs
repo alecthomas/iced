@@ -846,6 +846,8 @@ impl<Message> Binding<Message> {
                         match motion {
                             Motion::Left => Motion::Home,
                             Motion::Right => Motion::End,
+                            Motion::Up => Motion::DocumentStart,
+                            Motion::Down => Motion::DocumentEnd,
                             _ => motion,
                         }
                     } else {
@@ -1186,6 +1188,29 @@ mod tests {
             character("n", keyboard::Modifiers::CTRL),
             Some(Binding::Move(Motion::Down))
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_command_arrow_navigation() {
+        for (key, motion) in [
+            (key::Named::ArrowLeft, Motion::Home),
+            (key::Named::ArrowRight, Motion::End),
+            (key::Named::ArrowUp, Motion::DocumentStart),
+            (key::Named::ArrowDown, Motion::DocumentEnd),
+        ] {
+            assert_eq!(
+                named(key, keyboard::Modifiers::COMMAND),
+                Some(Binding::Move(motion))
+            );
+            assert_eq!(
+                named(
+                    key,
+                    keyboard::Modifiers::COMMAND | keyboard::Modifiers::SHIFT
+                ),
+                Some(Binding::Select(motion))
+            );
+        }
     }
 }
 
