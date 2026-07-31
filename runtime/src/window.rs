@@ -443,6 +443,24 @@ where
     })
 }
 
+/// Simulates an input `event` against the window with the given `id`.
+///
+/// The event is dispatched through the live widget tree using `cursor`
+/// without moving the operating system cursor. The resulting event status is
+/// produced after dispatch completes.
+pub fn simulate_event(
+    id: Id,
+    event: crate::core::Event,
+    cursor: crate::core::mouse::Cursor,
+) -> Task<crate::core::event::Status> {
+    task::oneshot(move |channel| crate::Action::SimulateEvent {
+        window: id,
+        event,
+        cursor,
+        channel,
+    })
+}
+
 /// Captures a [`Screenshot`] from the window.
 pub fn screenshot(id: Id) -> Task<Screenshot> {
     task::oneshot(move |channel| crate::Action::Window(Action::Screenshot(id, channel)))
@@ -476,4 +494,49 @@ pub fn allow_automatic_tabbing<T>(enabled: bool) -> Task<T> {
     task::effect(crate::Action::Window(Action::SetAllowAutomaticTabbing(
         enabled,
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core;
+    use crate::futures::futures::StreamExt as _;
+
+    #[test]
+    fn simulate_event_reports_status_after_dispatch() {
+        let window = Id::unique();
+        let event =
+            core::Event::Mouse(core::mouse::Event::ButtonPressed(core::mouse::Button::Left));
+        let cursor = core::mouse::Cursor::Available(Point::new(20.0, 40.0));
+        let mut stream = task::into_stream(simulate_event(window, event.clone(), cursor))
+            .expect("simulate event task");
+
+        let action = crate::futures::futures::executor::block_on(stream.next())
+            .expect("simulate event action");
+        match action {
+            crate::Action::SimulateEvent {
+                window: actual_window,
+                event: actual_event,
+                cursor: actual_cursor,
+                channel,
+            } => {
+                assert_eq!(window, actual_window);
+                assert_eq!(event, actual_event);
+                assert_eq!(cursor, actual_cursor);
+                channel
+                    .send(core::event::Status::Captured)
+                    .expect("send event status");
+            }
+            _ => panic!("expected simulate event action"),
+        }
+
+        let completion = crate::futures::futures::executor::block_on(stream.next())
+            .expect("simulate event completion");
+        match completion {
+            crate::Action::Output(status) => {
+                assert_eq!(core::event::Status::Captured, status);
+            }
+            _ => panic!("expected event status output"),
+        }
+    }
 }

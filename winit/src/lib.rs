@@ -62,9 +62,74 @@ use program::Program;
 
 use rustc_hash::FxHashMap;
 use std::borrow::Cow;
+use std::collections::VecDeque;
 use std::mem::ManuallyDrop;
 use std::slice;
 use std::sync::Arc;
+
+struct QueuedEvent {
+    window: window::Id,
+    event: core::Event,
+    cursor: Option<mouse::Cursor>,
+    simulation: Option<Simulation>,
+}
+
+struct Simulation {
+    channel: oneshot::Sender<core::event::Status>,
+}
+
+impl QueuedEvent {
+    fn new(window: window::Id, event: core::Event) -> Self {
+        Self {
+            window,
+            event,
+            cursor: None,
+            simulation: None,
+        }
+    }
+
+    fn with_cursor(window: window::Id, event: core::Event, cursor: mouse::Cursor) -> Self {
+        Self {
+            window,
+            event,
+            cursor: Some(cursor),
+            simulation: None,
+        }
+    }
+
+    fn simulated(
+        window: window::Id,
+        event: core::Event,
+        cursor: mouse::Cursor,
+        channel: oneshot::Sender<core::event::Status>,
+    ) -> Self {
+        Self {
+            window,
+            event,
+            cursor: Some(cursor),
+            simulation: Some(Simulation { channel }),
+        }
+    }
+}
+
+fn next_event_batch(
+    events: &mut VecDeque<QueuedEvent>,
+) -> Option<(Option<mouse::Cursor>, Vec<QueuedEvent>)> {
+    let cursor = events.front()?.cursor;
+    let mut batch = Vec::new();
+
+    while events
+        .front()
+        .is_some_and(|event| cursor.is_none() && event.cursor.is_none())
+    {
+        batch.push(events.pop_front().expect("Queued event must exist"));
+    }
+    if batch.is_empty() {
+        batch.push(events.pop_front().expect("Queued event must exist"));
+    }
+
+    Some((cursor, batch))
+}
 
 /// Runs a [`Program`] with the provided settings.
 pub fn run<P>(program: P) -> Result<(), Error>
@@ -682,7 +747,7 @@ async fn run_instance<P>(
                     window.raw.set_visible(true);
                 }
 
-                events.push((
+                events.push(QueuedEvent::new(
                     id,
                     core::Event::Window(window::Event::Opened {
                         position: window.position(),
@@ -1067,7 +1132,15 @@ async fn run_instance<P>(
                                 window.state.scale_factor(),
                                 window.state.modifiers(),
                             ) {
-                                events.push((id, event));
+                                if matches!(event, core::Event::Mouse(_)) {
+                                    events.push(QueuedEvent::with_cursor(
+                                        id,
+                                        event,
+                                        window.state.cursor(),
+                                    ));
+                                } else {
+                                    events.push(QueuedEvent::new(id, event));
+                                }
                             }
                         }
                     }
@@ -1085,75 +1158,97 @@ async fn run_instance<P>(
 
                         for (id, window) in window_manager.iter_mut() {
                             let interact_span = debug::interact(id);
-                            let mut window_events = vec![];
+                            let mut window_events = VecDeque::new();
+                            let mut remaining_events = Vec::with_capacity(events.len());
 
-                            events.retain(|(window_id, event)| {
-                                if *window_id == id {
-                                    window_events.push(event.clone());
-                                    false
+                            for event in events.drain(..) {
+                                if event.window == id {
+                                    window_events.push_back(event);
                                 } else {
-                                    true
+                                    remaining_events.push(event);
                                 }
-                            });
+                            }
+                            events = remaining_events;
 
                             if window_events.is_empty() {
                                 continue;
                             }
 
-                            let (ui_state, statuses) = user_interfaces
-                                .get_mut(&id)
-                                .expect("Get user interface")
-                                .update(
-                                    &window.raw,
-                                    &window.waker,
-                                    &window_events,
-                                    window.state.cursor(),
-                                    &mut window.renderer,
-                                    &mut messages,
-                                );
+                            while !window_events.is_empty() {
+                                let (cursor_override, batch) = next_event_batch(&mut window_events)
+                                    .expect("Queued event batch must exist");
 
-                            #[cfg(feature = "unconditional-rendering")]
-                            window.request_redraw(window::RedrawRequest::NextFrame);
+                                let cursor =
+                                    cursor_override.unwrap_or_else(|| window.state.cursor());
+                                if cursor_override.is_some() {
+                                    window.state.set_cursor(cursor);
+                                }
+                                let raw_events = batch
+                                    .iter()
+                                    .map(|event| event.event.clone())
+                                    .collect::<Vec<_>>();
 
-                            match ui_state {
-                                user_interface::State::Updated {
-                                    redraw_request: _redraw_request,
-                                    mouse_interaction,
-                                    clipboard: clipboard_requests,
-                                    ..
-                                } => {
-                                    window.update_mouse(mouse_interaction);
-
-                                    #[cfg(not(feature = "unconditional-rendering"))]
-                                    window.request_redraw(_redraw_request);
-
-                                    run_clipboard(
-                                        &mut proxy,
-                                        &mut clipboard,
-                                        clipboard_requests,
-                                        id,
+                                let (ui_state, statuses) = user_interfaces
+                                    .get_mut(&id)
+                                    .expect("Get user interface")
+                                    .update(
+                                        &window.raw,
+                                        &window.waker,
+                                        &raw_events,
+                                        cursor,
+                                        &mut window.renderer,
+                                        &mut messages,
                                     );
-                                }
-                                user_interface::State::Outdated => {
-                                    uis_stale = true;
-                                }
-                            }
 
-                            for (event, status) in window_events.into_iter().zip(statuses) {
-                                runtime.broadcast(subscription::Event::Interaction {
-                                    window: id,
-                                    event,
-                                    status,
-                                });
+                                #[cfg(feature = "unconditional-rendering")]
+                                window.request_redraw(window::RedrawRequest::NextFrame);
+
+                                match ui_state {
+                                    user_interface::State::Updated {
+                                        redraw_request: _redraw_request,
+                                        mouse_interaction,
+                                        clipboard: clipboard_requests,
+                                        ..
+                                    } => {
+                                        window.update_mouse(mouse_interaction);
+
+                                        #[cfg(not(feature = "unconditional-rendering"))]
+                                        window.request_redraw(_redraw_request);
+
+                                        run_clipboard(
+                                            &mut proxy,
+                                            &mut clipboard,
+                                            clipboard_requests,
+                                            id,
+                                        );
+                                    }
+                                    user_interface::State::Outdated => {
+                                        uis_stale = true;
+                                    }
+                                }
+
+                                for (event, status) in batch.into_iter().zip(statuses) {
+                                    if let Some(simulation) = event.simulation {
+                                        let _ = simulation.channel.send(status);
+                                    }
+                                    runtime.broadcast(subscription::Event::Interaction {
+                                        window: id,
+                                        event: event.event,
+                                        status,
+                                    });
+                                }
                             }
 
                             interact_span.finish();
                         }
 
-                        for (id, event) in events.drain(..) {
+                        for event in events.drain(..) {
+                            if let Some(simulation) = event.simulation {
+                                let _ = simulation.channel.send(core::event::Status::Ignored);
+                            }
                             runtime.broadcast(subscription::Event::Interaction {
-                                window: id,
-                                event,
+                                window: event.window,
+                                event: event.event,
                                 status: core::event::Status::Ignored,
                             });
                         }
@@ -1300,7 +1395,7 @@ fn run_action<'a, P, C>(
     _proxy: &Proxy<P::Message>,
     runtime: &mut Runtime<P::Executor, Proxy<P::Message>, Action<P::Message>>,
     compositor: &mut Option<C>,
-    events: &mut Vec<(window::Id, core::Event)>,
+    events: &mut Vec<QueuedEvent>,
     messages: &mut shell::Bus<P::Message>,
     clipboard: &mut Clipboard,
     control_sender: &mut mpsc::UnboundedSender<Control>,
@@ -1358,7 +1453,10 @@ fn run_action<'a, P, C>(
                 let _ = interfaces.remove(&id);
 
                 if window_manager.remove(id).is_some() {
-                    events.push((id, core::Event::Window(core::window::Event::Closed)));
+                    events.push(QueuedEvent::new(
+                        id,
+                        core::Event::Window(core::window::Event::Closed),
+                    ));
                 }
 
                 if window_manager.is_empty() {
@@ -1779,7 +1877,15 @@ fn run_action<'a, P, C>(
             backend::Action::Configure(_, _) => {}
         },
         Action::Event { window, event } => {
-            events.push((window, event));
+            events.push(QueuedEvent::new(window, event));
+        }
+        Action::SimulateEvent {
+            window,
+            event,
+            cursor,
+            channel,
+        } => {
+            events.push(QueuedEvent::simulated(window, event, cursor, channel));
         }
         Action::Tick => {
             for (_id, window) in window_manager.iter_mut() {
@@ -1943,5 +2049,53 @@ fn run_clipboard<Message: Send>(
                 event: core::Event::Clipboard(core::clipboard::Event::Written(result)),
             });
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn simulated_cursor_events_keep_their_queue_order() {
+        let window = window::Id::unique();
+        let first_cursor = mouse::Cursor::Available(Point::new(10.0, 20.0));
+        let second_cursor = mouse::Cursor::Available(Point::new(30.0, 40.0));
+        let mut events = VecDeque::from([
+            QueuedEvent::new(window, core::Event::Waken),
+            QueuedEvent::new(window, core::Event::Waken),
+            QueuedEvent::with_cursor(
+                window,
+                core::Event::Mouse(mouse::Event::CursorMoved {
+                    position: Point::new(10.0, 20.0),
+                }),
+                first_cursor,
+            ),
+            QueuedEvent::with_cursor(
+                window,
+                core::Event::Mouse(mouse::Event::CursorMoved {
+                    position: Point::new(30.0, 40.0),
+                }),
+                second_cursor,
+            ),
+            QueuedEvent::new(window, core::Event::Waken),
+        ]);
+
+        let (cursor, batch) = next_event_batch(&mut events).unwrap();
+        assert_eq!(None, cursor);
+        assert_eq!(2, batch.len());
+
+        let (cursor, batch) = next_event_batch(&mut events).unwrap();
+        assert_eq!(Some(first_cursor), cursor);
+        assert_eq!(1, batch.len());
+
+        let (cursor, batch) = next_event_batch(&mut events).unwrap();
+        assert_eq!(Some(second_cursor), cursor);
+        assert_eq!(1, batch.len());
+
+        let (cursor, batch) = next_event_batch(&mut events).unwrap();
+        assert_eq!(None, cursor);
+        assert_eq!(1, batch.len());
+        assert!(events.is_empty());
     }
 }

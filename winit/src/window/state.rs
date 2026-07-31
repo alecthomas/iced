@@ -116,6 +116,13 @@ where
             .unwrap_or(mouse::Cursor::Unavailable)
     }
 
+    pub fn set_cursor(&mut self, cursor: mouse::Cursor) {
+        self.cursor_position = cursor.position().map(|position| {
+            winit::dpi::LogicalPosition::new(f64::from(position.x), f64::from(position.y))
+                .to_physical(f64::from(self.viewport.scale_factor()))
+        });
+    }
+
     pub fn modifiers(&self) -> winit::keyboard::ModifiersState {
         self.modifiers
     }

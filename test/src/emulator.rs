@@ -273,6 +273,45 @@ impl<P: Program + 'static> Emulator<P> {
                     // TODO
                     dbg!(window, event);
                 }
+                runtime::Action::SimulateEvent {
+                    window,
+                    event,
+                    cursor,
+                    channel,
+                } => {
+                    if window != self.window {
+                        let _ = channel.send(core::event::Status::Ignored);
+                        return;
+                    }
+
+                    self.cursor = cursor;
+                    let mut user_interface = UserInterface::build(
+                        program.view(&self.state, self.window),
+                        self.size,
+                        self.cache.take().unwrap(),
+                        &mut self.renderer,
+                    );
+                    let mut messages = Vec::new();
+                    let (_state, statuses) = user_interface.update(
+                        &window::Headless,
+                        &shell::Waker::noop(),
+                        &[event],
+                        self.cursor,
+                        &mut self.renderer,
+                        &mut messages,
+                    );
+                    self.cache = Some(user_interface.into_cache());
+
+                    let status = statuses
+                        .first()
+                        .copied()
+                        .unwrap_or(core::event::Status::Ignored);
+                    let _ = channel.send(status);
+
+                    for message in messages {
+                        self.update(program, message);
+                    }
+                }
                 runtime::Action::Tick => {
                     // TODO
                 }

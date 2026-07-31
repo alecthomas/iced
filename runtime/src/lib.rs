@@ -27,6 +27,7 @@ pub use task::Task;
 pub use user_interface::UserInterface;
 
 use crate::core::Event;
+use crate::futures::futures::channel::oneshot;
 
 use std::fmt;
 
@@ -64,6 +65,18 @@ pub enum Action<T> {
         event: Event,
     },
 
+    /// Simulate an input event against a window.
+    SimulateEvent {
+        /// The [`window::Id`](core::window::Id) receiving the event.
+        window: core::window::Id,
+        /// The [`Event`] to simulate.
+        event: Event,
+        /// The cursor state used while dispatching the event.
+        cursor: core::mouse::Cursor,
+        /// Reports the event status after the widget tree processes it.
+        channel: oneshot::Sender<core::event::Status>,
+    },
+
     /// Poll any resources that may have pending computations.
     Tick,
 
@@ -94,6 +107,17 @@ impl<T> Action<T> {
             Action::Image(action) => Err(Action::Image(action)),
             Action::Backend(action) => Err(Action::Backend(action)),
             Action::Event { window, event } => Err(Action::Event { window, event }),
+            Action::SimulateEvent {
+                window,
+                event,
+                cursor,
+                channel,
+            } => Err(Action::SimulateEvent {
+                window,
+                event,
+                cursor,
+                channel,
+            }),
             Action::Tick => Err(Action::Tick),
             Action::Reload => Err(Action::Reload),
             Action::Exit => Err(Action::Exit),
@@ -124,6 +148,15 @@ where
             Action::Event { window, event } => write!(
                 f,
                 "Action::Event {{ window: {window:?}, event: {event:?} }}"
+            ),
+            Action::SimulateEvent {
+                window,
+                event,
+                cursor,
+                ..
+            } => write!(
+                f,
+                "Action::SimulateEvent {{ window: {window:?}, event: {event:?}, cursor: {cursor:?} }}"
             ),
             Action::Tick => write!(f, "Action::Tick"),
             Action::Reload => write!(f, "Action::Reload"),
