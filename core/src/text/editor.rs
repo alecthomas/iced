@@ -1017,10 +1017,7 @@ mod tests {
         }
     }
 
-    fn character(
-        character: &str,
-        modifiers: keyboard::Modifiers,
-    ) -> Option<Binding<()>> {
+    fn character(character: &str, modifiers: keyboard::Modifiers) -> Option<Binding<()>> {
         Binding::from_key_press(key_press(
             keyboard::Key::Character(character.into()),
             modifiers,

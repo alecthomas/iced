@@ -291,7 +291,7 @@ impl<P: Program + 'static> Emulator<P> {
                         self.cache.take().unwrap(),
                         &mut self.renderer,
                     );
-                    let mut messages = Vec::new();
+                    let mut messages = shell::Bus::new();
                     let (_state, statuses) = user_interface.update(
                         &window::Headless,
                         &shell::Waker::noop(),
