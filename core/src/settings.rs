@@ -63,15 +63,6 @@ pub struct Settings {
     ///
     /// By default, it is enabled.
     pub vsync: bool,
-
-    /// The desired maximum number of queued frames.
-    ///
-    /// Higher values can improve frame pacing at the cost of additional
-    /// latency and memory usage. The graphics backend may clamp this value to
-    /// the supported range.
-    ///
-    /// By default, it is `1`.
-    pub maximum_frame_latency: u32,
 }
 
 impl Default for Settings {
@@ -89,7 +80,6 @@ impl Default for Settings {
             power_preference: backend::PowerPreference::None,
             antialiasing: true,
             vsync: true,
-            maximum_frame_latency: 1,
         }
     }
 }

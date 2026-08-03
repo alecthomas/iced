@@ -162,11 +162,6 @@ pub struct Settings {
     ///
     /// By default, it is `true`.
     pub vsync: bool,
-
-    /// The desired maximum number of queued frames.
-    ///
-    /// By default, it is `1`.
-    pub maximum_frame_latency: u32,
 }
 
 impl Default for Settings {
@@ -175,7 +170,6 @@ impl Default for Settings {
             backend: Backend::Best,
             antialiasing: true,
             vsync: true,
-            maximum_frame_latency: 1,
             power_preference: PowerPreference::None,
         }
     }
@@ -187,7 +181,6 @@ impl From<&crate::Settings> for Settings {
             backend: settings.backend.clone(),
             antialiasing: settings.antialiasing,
             vsync: settings.vsync,
-            maximum_frame_latency: settings.maximum_frame_latency,
             power_preference: settings.power_preference,
         }
     }
