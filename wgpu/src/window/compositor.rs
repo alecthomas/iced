@@ -327,7 +327,7 @@ impl graphics::Compositor for Compositor {
                 height,
                 alpha_mode: self.alpha_mode,
                 view_formats: vec![],
-                desired_maximum_frame_latency: 1,
+                desired_maximum_frame_latency: self.settings.maximum_frame_latency,
             },
         );
     }
@@ -388,6 +388,11 @@ pub struct Settings {
     ///
     /// By default, it is `None`.
     pub antialiasing: Option<Antialiasing>,
+
+    /// The desired maximum number of queued frames.
+    ///
+    /// By default, it is `1`.
+    pub maximum_frame_latency: u32,
 }
 
 impl Default for Settings {
@@ -397,6 +402,7 @@ impl Default for Settings {
             backends: wgpu::Backends::all(),
             power_preference: backend::PowerPreference::None,
             antialiasing: None,
+            maximum_frame_latency: 1,
         }
     }
 }
@@ -425,7 +431,24 @@ impl From<backend::Settings> for Settings {
             antialiasing: settings.antialiasing.then_some(Antialiasing::MSAAx4),
             backends,
             power_preference: settings.power_preference,
+            maximum_frame_latency: settings.maximum_frame_latency,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Settings;
+    use crate::core::backend;
+
+    #[test]
+    fn maximum_frame_latency_is_configurable() {
+        let settings = Settings::from(backend::Settings {
+            maximum_frame_latency: 2,
+            ..backend::Settings::default()
+        });
+
+        assert_eq!(settings.maximum_frame_latency, 2);
     }
 }
 
