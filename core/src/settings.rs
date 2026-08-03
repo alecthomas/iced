@@ -1,7 +1,7 @@
 //! Configure your application.
 use crate::backend;
 use crate::renderer;
-use crate::{Backend, Font, Pixels};
+use crate::{Backend, Font, Pixels, font};
 
 use std::borrow::Cow;
 
@@ -16,6 +16,9 @@ pub struct Settings {
 
     /// The fonts to load on boot.
     pub fonts: Vec<Cow<'static, [u8]>>,
+
+    /// The application font families and their preferred fallbacks.
+    pub font_settings: font::Settings,
 
     /// The default [`Font`] to be used.
     ///
@@ -69,6 +72,7 @@ impl Default for Settings {
         Self {
             id: None,
             fonts: Vec::new(),
+            font_settings: font::Settings::default(),
             default_font: renderer.default_font,
             default_text_size: renderer.default_text_size,
             metrics_hinting: true,

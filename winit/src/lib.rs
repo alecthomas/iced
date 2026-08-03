@@ -214,6 +214,7 @@ where
         is_daemon,
         backend_settings,
         renderer_settings,
+        settings.font_settings,
         settings.fonts,
         system_theme_receiver,
     ));
@@ -554,6 +555,7 @@ async fn run_instance<P>(
     is_daemon: bool,
     backend_settings: backend::Settings,
     mut renderer_settings: renderer::Settings,
+    font_settings: core::font::Settings,
     default_fonts: Vec<Cow<'static, [u8]>>,
     mut _system_theme: oneshot::Receiver<theme::Mode>,
 ) where
@@ -637,6 +639,7 @@ async fn run_instance<P>(
                         let backend_settings = backend_settings.clone();
                         let display_handle = display_handle.clone();
                         let proxy = proxy.clone();
+                        let font_settings = font_settings.clone();
                         let default_fonts = default_fonts.clone();
 
                         async move {
@@ -652,6 +655,8 @@ async fn run_instance<P>(
                                 .await;
 
                             if let Ok(compositor) = &mut compositor {
+                                compositor.configure_fonts(&font_settings);
+
                                 for font in default_fonts {
                                     compositor.load_font(font.clone());
                                 }

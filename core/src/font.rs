@@ -1,6 +1,19 @@
 //! Load and use fonts.
 use std::hash::Hash;
 
+/// Font family settings for an application.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Settings {
+    /// The primary proportional font family.
+    pub family: Option<String>,
+    /// Preferred proportional fallback families.
+    pub fallbacks: Vec<String>,
+    /// The primary monospaced font family.
+    pub monospace_family: Option<String>,
+    /// Preferred monospaced fallback families.
+    pub monospace_fallbacks: Vec<String>,
+}
+
 /// A font.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Font {

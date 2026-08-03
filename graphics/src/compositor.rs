@@ -61,6 +61,14 @@ pub trait Compositor: Sized {
         Ok(())
     }
 
+    /// Configures primary and preferred fallback font families.
+    fn configure_fonts(&mut self, settings: &font::Settings) {
+        crate::text::font_system()
+            .write()
+            .expect("Write to font system")
+            .configure(settings);
+    }
+
     /// Lists all the available font families.
     fn list_fonts(&mut self) -> Result<Vec<font::Family>, font::Error> {
         use std::collections::BTreeSet;

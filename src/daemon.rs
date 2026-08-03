@@ -173,6 +173,39 @@ impl<P: Program> Daemon<P> {
         }
     }
 
+    /// Sets the primary proportional font family of the [`Daemon`].
+    pub fn font_family(mut self, family: impl Into<String>) -> Self {
+        self.settings.font_settings.family = Some(family.into());
+        self
+    }
+
+    /// Sets preferred proportional fallback families of the [`Daemon`].
+    pub fn font_fallbacks<I, S>(mut self, families: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.settings.font_settings.fallbacks = families.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Sets the primary monospaced font family of the [`Daemon`].
+    pub fn monospace_font_family(mut self, family: impl Into<String>) -> Self {
+        self.settings.font_settings.monospace_family = Some(family.into());
+        self
+    }
+
+    /// Sets preferred monospaced fallback families of the [`Daemon`].
+    pub fn monospace_font_fallbacks<I, S>(mut self, families: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.settings.font_settings.monospace_fallbacks =
+            families.into_iter().map(Into::into).collect();
+        self
+    }
+
     /// Adds a font to the list of fonts that will be loaded at the start of the [`Daemon`].
     pub fn font(mut self, font: impl Into<Cow<'static, [u8]>>) -> Self {
         self.settings.fonts.push(font.into());

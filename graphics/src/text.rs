@@ -171,6 +171,31 @@ impl FontSystem {
         &mut self.raw
     }
 
+    /// Configures primary and preferred fallback font families.
+    pub fn configure(&mut self, settings: &font::Settings) {
+        if let Some(family) = &settings.family {
+            self.raw.db_mut().set_sans_serif_family(family);
+        }
+        if let Some(family) = &settings.monospace_family {
+            self.raw.db_mut().set_monospace_family(family);
+        }
+
+        self.raw.set_proportional_fallbacks(
+            settings
+                .fallbacks
+                .iter()
+                .map(|family| cosmic_text::Family::Name(family)),
+        );
+        self.raw.set_monospace_fallbacks(
+            settings
+                .monospace_fallbacks
+                .iter()
+                .map(|family| cosmic_text::Family::Name(family)),
+        );
+
+        self.version = Version(self.version.0 + 1);
+    }
+
     /// Loads a font from its bytes.
     pub fn load_font(&mut self, bytes: Cow<'static, [u8]>) {
         if let Cow::Borrowed(bytes) = bytes {
@@ -224,6 +249,48 @@ pub struct Raw {
     pub color: Color,
     /// The clip bounds of the text.
     pub clip_bounds: Rectangle,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn configure_sets_primary_font_families() {
+        let raw = cosmic_text::FontSystem::new_with_locale_and_db(
+            "en-US".into(),
+            cosmic_text::fontdb::Database::new(),
+        );
+        let mut font_system = FontSystem {
+            raw,
+            loaded_fonts: HashSet::new(),
+            version: Version::default(),
+        };
+        let settings = font::Settings {
+            family: Some("Proportional Test".into()),
+            fallbacks: vec!["Proportional Fallback".into()],
+            monospace_family: Some("Monospace Test".into()),
+            monospace_fallbacks: vec!["Monospace Fallback".into()],
+        };
+
+        font_system.configure(&settings);
+
+        assert_eq!(
+            "Proportional Test",
+            font_system
+                .raw
+                .db()
+                .family_name(&cosmic_text::Family::SansSerif)
+        );
+        assert_eq!(
+            "Monospace Test",
+            font_system
+                .raw
+                .db()
+                .family_name(&cosmic_text::Family::Monospace)
+        );
+        assert_eq!(Version(1), font_system.version());
+    }
 }
 
 impl PartialEq for Raw {
