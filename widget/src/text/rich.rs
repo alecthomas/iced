@@ -303,12 +303,17 @@ where
                         translation + Vector::new(0.0, size.0 + (line_height.0 - size.0) / 2.0);
 
                     if span.underline || is_hovered_link {
+                        let underline_position = translation
+                            + Vector::new(
+                                0.0,
+                                underline_y(size, line_height, span.underline_offset),
+                            );
+
                         for bounds in &regions {
                             renderer.fill_quad(
                                 renderer::Quad {
                                     bounds: Rectangle::new(
-                                        bounds.position() + baseline
-                                            - Vector::new(0.0, size.0 * 0.08),
+                                        bounds.position() + underline_position,
                                         Size::new(bounds.width, 1.0),
                                     ),
                                     ..Default::default()
@@ -436,6 +441,10 @@ where
     }
 }
 
+fn underline_y(size: Pixels, line_height: Pixels, offset: Option<Pixels>) -> f32 {
+    size.0 + (line_height.0 - size.0) / 2.0 + size.0 * 0.08 + offset.map_or(0.0, |offset| offset.0)
+}
+
 fn layout<Link, Renderer>(
     state: &mut State<Link, Renderer::Paragraph>,
     renderer: &Renderer,
@@ -531,5 +540,27 @@ where
         text: Rich<'a, Link, Message, Theme, Renderer>,
     ) -> Element<'a, Message, Theme, Renderer> {
         Element::new(text)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn underline_is_below_the_baseline_and_accepts_an_offset() {
+        let size = Pixels(16.0);
+        let line_height = Pixels(20.0);
+        let default = underline_y(size, line_height, None);
+        let adjusted = underline_y(size, line_height, Some(Pixels(2.0)));
+
+        assert!(default > size.0 + (line_height.0 - size.0) / 2.0);
+        assert_eq!(default + 2.0, adjusted);
+        assert_eq!(
+            Some(Pixels(2.0)),
+            Span::<()>::new("link")
+                .underline_offset(2.0)
+                .underline_offset
+        );
     }
 }

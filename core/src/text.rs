@@ -428,6 +428,10 @@ pub struct Span<'a, Link = (), Font = crate::Font> {
     pub padding: Padding,
     /// Whether the [`Span`] should be underlined or not.
     pub underline: bool,
+    /// The vertical adjustment of the underline in logical pixels.
+    ///
+    /// Positive values move the underline down; negative values move it up.
+    pub underline_offset: Option<Pixels>,
     /// Whether the [`Span`] should be struck through or not.
     pub strikethrough: bool,
 }
@@ -568,6 +572,14 @@ impl<'a, Link, Font> Span<'a, Link, Font> {
         self
     }
 
+    /// Sets the vertical adjustment of the underline in logical pixels.
+    ///
+    /// Positive values move the underline down; negative values move it up.
+    pub fn underline_offset(mut self, offset: impl Into<Pixels>) -> Self {
+        self.underline_offset = Some(offset.into());
+        self
+    }
+
     /// Sets whether the [`Span`] should be struck through or not.
     pub fn strikethrough(mut self, strikethrough: bool) -> Self {
         self.strikethrough = strikethrough;
@@ -586,6 +598,7 @@ impl<'a, Link, Font> Span<'a, Link, Font> {
             highlight: self.highlight,
             padding: self.padding,
             underline: self.underline,
+            underline_offset: self.underline_offset,
             strikethrough: self.strikethrough,
         }
     }
@@ -603,6 +616,7 @@ impl<Link, Font> Default for Span<'_, Link, Font> {
             highlight: None,
             padding: Padding::default(),
             underline: false,
+            underline_offset: None,
             strikethrough: false,
         }
     }
