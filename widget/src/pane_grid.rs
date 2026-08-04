@@ -682,43 +682,43 @@ where
                 *action = state::Action::Idle;
             }
             Event::Mouse(mouse::Event::CursorMoved { .. })
-            | Event::Touch(touch::Event::FingerMoved { .. }) => {
-                if self.resize_leeway().is_some() {
-                    if let Some((split, _)) = action.picked_split() {
-                        let bounds = layout.bounds();
+            | Event::Touch(touch::Event::FingerMoved { .. })
+                if self.resize_leeway().is_some() =>
+            {
+                if let Some((split, _)) = action.picked_split() {
+                    let bounds = layout.bounds();
 
-                        let splits = self.split_regions(bounds.size());
+                    let splits = self.split_regions(bounds.size());
 
-                        if let Some((axis, rectangle, _)) = splits.get(&split)
-                            && let Some(cursor_position) = cursor.position()
-                        {
-                            let ratio = match axis {
-                                Axis::Horizontal => {
-                                    let position = cursor_position.y - bounds.y - rectangle.y;
+                    if let Some((axis, rectangle, _)) = splits.get(&split)
+                        && let Some(cursor_position) = cursor.position()
+                    {
+                        let ratio = match axis {
+                            Axis::Horizontal => {
+                                let position = cursor_position.y - bounds.y - rectangle.y;
 
-                                    (position / rectangle.height).clamp(0.0, 1.0)
-                                }
-                                Axis::Vertical => {
-                                    let position = cursor_position.x - bounds.x - rectangle.x;
-
-                                    (position / rectangle.width).clamp(0.0, 1.0)
-                                }
-                            };
-
-                            let event = ResizeEvent { split, ratio };
-
-                            if let Some((_, on_resize)) = &self.on_resize {
-                                shell.publish(on_resize(event));
+                                (position / rectangle.height).clamp(0.0, 1.0)
                             }
-                            if let Some((_, on_resize)) = &self.on_resize_interaction {
-                                shell.publish(on_resize(ResizeInteraction::Resized(event)));
-                            }
+                            Axis::Vertical => {
+                                let position = cursor_position.x - bounds.x - rectangle.x;
 
-                            shell.capture_event();
+                                (position / rectangle.width).clamp(0.0, 1.0)
+                            }
+                        };
+
+                        let event = ResizeEvent { split, ratio };
+
+                        if let Some((_, on_resize)) = &self.on_resize {
+                            shell.publish(on_resize(event));
                         }
-                    } else if action.picked_pane().is_some() {
-                        shell.request_redraw();
+                        if let Some((_, on_resize)) = &self.on_resize_interaction {
+                            shell.publish(on_resize(ResizeInteraction::Resized(event)));
+                        }
+
+                        shell.capture_event();
                     }
+                } else if action.picked_pane().is_some() {
+                    shell.request_redraw();
                 }
             }
             _ => {}

@@ -32,7 +32,7 @@ impl Axis {
     }
 
     pub(crate) fn split_with_constraints(
-        &self,
+        self,
         rectangle: &Rectangle,
         ratio: f32,
         spacing: f32,
