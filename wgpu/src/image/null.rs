@@ -4,6 +4,10 @@ pub use crate::graphics::Image;
 pub struct Batch;
 
 impl Batch {
+    pub const fn new() -> Self {
+        Self
+    }
+
     pub fn push(&mut self, _image: Image) {}
 
     pub fn clear(&mut self) {}
