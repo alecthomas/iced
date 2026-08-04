@@ -20,16 +20,38 @@ impl Axis {
         min_size_a: f32,
         min_size_b: f32,
     ) -> (Rectangle, Rectangle, f32) {
+        self.split_with_constraints(
+            rectangle,
+            ratio,
+            spacing,
+            min_size_a,
+            f32::INFINITY,
+            min_size_b,
+            f32::INFINITY,
+        )
+    }
+
+    pub(crate) fn split_with_constraints(
+        &self,
+        rectangle: &Rectangle,
+        ratio: f32,
+        spacing: f32,
+        min_size_a: f32,
+        max_size_a: f32,
+        min_size_b: f32,
+        max_size_b: f32,
+    ) -> (Rectangle, Rectangle, f32) {
         match self {
             Axis::Horizontal => {
-                let height_top = (rectangle.height * ratio - spacing / 2.0)
-                    .round()
-                    .max(min_size_a)
-                    .min(rectangle.height - min_size_b - spacing);
-
-                let height_bottom = (rectangle.height - height_top - spacing).max(min_size_b);
-
-                let ratio = (height_top + spacing / 2.0) / rectangle.height;
+                let (height_top, height_bottom, ratio) = split_extent(
+                    rectangle.height,
+                    ratio,
+                    spacing,
+                    min_size_a,
+                    max_size_a,
+                    min_size_b,
+                    max_size_b,
+                );
 
                 (
                     Rectangle {
@@ -45,14 +67,15 @@ impl Axis {
                 )
             }
             Axis::Vertical => {
-                let width_left = (rectangle.width * ratio - spacing / 2.0)
-                    .round()
-                    .max(min_size_a)
-                    .min(rectangle.width - min_size_b - spacing);
-
-                let width_right = (rectangle.width - width_left - spacing).max(min_size_b);
-
-                let ratio = (width_left + spacing / 2.0) / rectangle.width;
+                let (width_left, width_right, ratio) = split_extent(
+                    rectangle.width,
+                    ratio,
+                    spacing,
+                    min_size_a,
+                    max_size_a,
+                    min_size_b,
+                    max_size_b,
+                );
 
                 (
                     Rectangle {
@@ -87,6 +110,51 @@ impl Axis {
             },
         }
     }
+}
+
+fn split_extent(
+    extent: f32,
+    ratio: f32,
+    spacing: f32,
+    min_a: f32,
+    max_a: f32,
+    min_b: f32,
+    max_b: f32,
+) -> (f32, f32, f32) {
+    let extent = extent.max(0.0);
+    let spacing = spacing.max(0.0).min(extent);
+    let available = extent - spacing;
+    let ratio = if ratio.is_finite() {
+        ratio.clamp(0.0, 1.0)
+    } else {
+        0.5
+    };
+    let desired = (extent * ratio - spacing / 2.0).round();
+
+    let lower = min_a.max(available - max_b);
+    let upper = max_a.min(available - min_b);
+    let size_a = if lower <= upper {
+        desired.clamp(lower, upper)
+    } else if min_a + min_b > available {
+        let total_min = min_a + min_b;
+
+        if total_min > 0.0 {
+            available * min_a / total_min
+        } else {
+            available * ratio
+        }
+    } else {
+        desired.clamp(min_a.min(available), (available - min_b).max(0.0))
+    }
+    .clamp(0.0, available);
+    let size_b = available - size_a;
+    let actual_ratio = if extent > 0.0 {
+        (size_a + spacing / 2.0) / extent
+    } else {
+        0.5
+    };
+
+    (size_a, size_b, actual_ratio)
 }
 
 #[cfg(test)]
@@ -244,5 +312,48 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn split_respects_axis_constraints() {
+        let rectangle = Rectangle::new(
+            crate::core::Point::ORIGIN,
+            crate::core::Size::new(800.0, 600.0),
+        );
+        let (left, right, ratio) = Axis::Vertical.split_with_constraints(
+            &rectangle,
+            0.5,
+            4.0,
+            26.0,
+            26.0,
+            300.0,
+            f32::INFINITY,
+        );
+
+        assert_eq!(left.width, 26.0);
+        assert_eq!(right.width, 770.0);
+        assert_eq!(right.x, 30.0);
+        assert_eq!(ratio, 0.035);
+    }
+
+    #[test]
+    fn split_compresses_impossible_minimums_without_overflow() {
+        let rectangle = Rectangle::new(
+            crate::core::Point::ORIGIN,
+            crate::core::Size::new(500.0, 600.0),
+        );
+        let (left, right, _) = Axis::Vertical.split_with_constraints(
+            &rectangle,
+            0.5,
+            4.0,
+            300.0,
+            f32::INFINITY,
+            300.0,
+            f32::INFINITY,
+        );
+
+        assert_eq!(left.width, 248.0);
+        assert_eq!(right.width, 248.0);
+        assert_eq!(right.x + right.width, rectangle.width);
     }
 }

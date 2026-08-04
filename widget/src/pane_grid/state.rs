@@ -283,6 +283,25 @@ impl<T> State<T> {
         let _ = self.internal.layout.resize(split, ratio);
     }
 
+    /// Resizes only the panes adjacent to the provided [`Split`].
+    ///
+    /// Unlike [`Self::resize`], nested panes outside the dragged boundary keep
+    /// their current size. The split stops when an adjacent pane reaches its
+    /// constraints.
+    pub fn resize_adjacent(
+        &mut self,
+        split: Split,
+        ratio: f32,
+        spacing: f32,
+        constraints: &BTreeMap<Pane, crate::pane_grid::Constraints>,
+        bounds: Size,
+    ) {
+        let _ = self
+            .internal
+            .layout
+            .resize_adjacent(split, ratio, spacing, constraints, bounds);
+    }
+
     /// Closes the given [`Pane`] and returns its internal state and its closest
     /// sibling, if it exists.
     pub fn close(&mut self, pane: Pane) -> Option<(T, Pane)> {

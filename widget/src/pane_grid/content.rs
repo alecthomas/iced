@@ -4,8 +4,35 @@ use crate::core::mouse;
 use crate::core::overlay;
 use crate::core::renderer;
 use crate::core::widget::{self, Tree};
-use crate::core::{self, Element, Event, Layout, Point, Rectangle, Shell, Size, Vector};
+use crate::core::{self, Element, Event, Layout, Pixels, Point, Rectangle, Shell, Size, Vector};
 use crate::pane_grid::{Draggable, TitleBar};
+
+/// A region of pane content that can be used to drag the pane.
+#[derive(Debug, Clone, Copy)]
+pub struct DragArea {
+    height: Option<f32>,
+}
+
+impl DragArea {
+    /// The full content bounds.
+    pub const BOUNDS: Self = Self { height: None };
+
+    /// The top strip of the content with the given height.
+    pub fn top(height: impl Into<Pixels>) -> Self {
+        Self {
+            height: Some(height.into().0),
+        }
+    }
+
+    fn contains(self, bounds: Rectangle, cursor: Point) -> bool {
+        let bounds = Rectangle {
+            height: self.height.unwrap_or(bounds.height).min(bounds.height),
+            ..bounds
+        };
+
+        bounds.contains(cursor)
+    }
+}
 
 /// The content of a [`Pane`].
 ///
@@ -16,6 +43,7 @@ where
     Renderer: core::Renderer,
 {
     title_bar: Option<TitleBar<'a, Message, Theme, Renderer>>,
+    drag_area: Option<DragArea>,
     body: Element<'a, Message, Theme, Renderer>,
     class: Theme::Class<'a>,
 }
@@ -29,6 +57,7 @@ where
     pub fn new(body: impl Into<Element<'a, Message, Theme, Renderer>>) -> Self {
         Self {
             title_bar: None,
+            drag_area: None,
             body: body.into(),
             class: Theme::default(),
         }
@@ -37,6 +66,12 @@ where
     /// Sets the [`TitleBar`] of the [`Content`].
     pub fn title_bar(mut self, title_bar: TitleBar<'a, Message, Theme, Renderer>) -> Self {
         self.title_bar = Some(title_bar);
+        self
+    }
+
+    /// Sets a region of the content that can be used to drag the pane.
+    pub fn drag_area(mut self, drag_area: DragArea) -> Self {
+        self.drag_area = Some(drag_area);
         self
     }
 
@@ -226,7 +261,7 @@ where
         renderer: &Renderer,
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
-        is_picked: bool,
+        is_dragging: bool,
     ) {
         let body_layout = if let Some(title_bar) = &mut self.title_bar {
             let mut children = layout.children();
@@ -246,7 +281,7 @@ where
             layout
         };
 
-        if !is_picked {
+        if !is_dragging {
             self.body.as_widget_mut().update(
                 &mut tree.children[0],
                 event,
@@ -265,18 +300,16 @@ where
         cursor: mouse::Cursor,
         drag_enabled: bool,
     ) -> Option<mouse::Interaction> {
-        let title_bar = self.title_bar.as_ref()?;
-
-        let mut children = layout.children();
-        let title_bar_layout = children.next().unwrap();
-
-        let is_over_pick_area = cursor
-            .position()
-            .map(|cursor_position| title_bar.is_over_pick_area(title_bar_layout, cursor_position))
-            .unwrap_or_default();
+        let is_over_pick_area = self.title_bar.as_ref().is_some_and(|title_bar| {
+            let mut children = layout.children();
+            let title_bar_layout = children.next().unwrap();
+            cursor
+                .position()
+                .is_some_and(|cursor| title_bar.is_over_pick_area(title_bar_layout, cursor))
+        });
 
         if is_over_pick_area && drag_enabled {
-            return Some(mouse::Interaction::Grab);
+            return Some(mouse::Interaction::Pointer);
         }
 
         None
@@ -297,13 +330,11 @@ where
 
             let is_over_pick_area = cursor
                 .position()
-                .map(|cursor_position| {
-                    title_bar.is_over_pick_area(title_bar_layout, cursor_position)
-                })
+                .map(|cursor_position| self.is_over_pick_area(layout, cursor_position))
                 .unwrap_or_default();
 
             if is_over_pick_area && drag_enabled {
-                return mouse::Interaction::Grab;
+                return mouse::Interaction::Pointer;
             }
 
             let mouse_interaction = title_bar.mouse_interaction(
@@ -319,10 +350,41 @@ where
             (layout, mouse::Interaction::default())
         };
 
-        self.body
+        let interaction = self
+            .body
             .as_widget()
             .mouse_interaction(&tree.children[0], body_layout, cursor, viewport, renderer)
-            .max(title_bar_interaction)
+            .max(title_bar_interaction);
+        let over_drag_area = self.drag_area.is_some_and(|area| {
+            cursor
+                .position()
+                .is_some_and(|cursor| area.contains(layout.bounds(), cursor))
+        });
+
+        if over_drag_area
+            && drag_enabled
+            && matches!(
+                interaction,
+                mouse::Interaction::None | mouse::Interaction::Idle
+            )
+        {
+            mouse::Interaction::Pointer
+        } else {
+            interaction
+        }
+    }
+
+    fn is_over_pick_area(&self, layout: Layout<'_>, cursor: Point) -> bool {
+        let over_title_bar = self.title_bar.as_ref().is_some_and(|title_bar| {
+            let mut children = layout.children();
+            let title_bar_layout = children.next().unwrap();
+            title_bar.is_over_pick_area(title_bar_layout, cursor)
+        });
+
+        over_title_bar
+            || self
+                .drag_area
+                .is_some_and(|area| area.contains(layout.bounds(), cursor))
     }
 
     pub(crate) fn overlay<'b>(
@@ -375,14 +437,7 @@ where
     Renderer: core::Renderer,
 {
     fn can_be_dragged_at(&self, layout: Layout<'_>, cursor_position: Point) -> bool {
-        if let Some(title_bar) = &self.title_bar {
-            let mut children = layout.children();
-            let title_bar_layout = children.next().unwrap();
-
-            title_bar.is_over_pick_area(title_bar_layout, cursor_position)
-        } else {
-            false
-        }
+        self.is_over_pick_area(layout, cursor_position)
     }
 }
 

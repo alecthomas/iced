@@ -1,5 +1,5 @@
 use crate::core::{Rectangle, Size};
-use crate::pane_grid::{Axis, Pane, Split};
+use crate::pane_grid::{Axis, Constraints, Pane, Split};
 
 use std::collections::BTreeMap;
 
@@ -38,6 +38,48 @@ enum Count {
         b: Box<Count>,
     },
     Pane,
+}
+
+#[derive(Debug)]
+enum ConstraintTree {
+    Split {
+        constraints: Constraints,
+        a: Box<ConstraintTree>,
+        b: Box<ConstraintTree>,
+    },
+    Pane(Constraints),
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Boundary {
+    Start,
+    End,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Branch {
+    A,
+    B,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ExtentConstraints {
+    min: f32,
+    max: f32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SplitSnapshot {
+    a: Rectangle,
+    b: Rectangle,
+}
+
+impl ConstraintTree {
+    fn constraints(&self) -> Constraints {
+        match self {
+            Self::Split { constraints, .. } | Self::Pane(constraints) => *constraints,
+        }
+    }
 }
 
 impl Count {
@@ -103,6 +145,56 @@ impl Node {
         }
     }
 
+    fn constraints(&self, panes: &BTreeMap<Pane, Constraints>, spacing: f32) -> ConstraintTree {
+        match self {
+            Node::Split { axis, a, b, .. } => {
+                let a = a.constraints(panes, spacing);
+                let b = b.constraints(panes, spacing);
+                let a_constraints = a.constraints();
+                let b_constraints = b.constraints();
+                let spacing = visible_spacing(spacing, a_constraints, b_constraints);
+                let constraints = if a_constraints.is_hidden() {
+                    b_constraints
+                } else if b_constraints.is_hidden() {
+                    a_constraints
+                } else {
+                    match axis {
+                        Axis::Horizontal => Constraints::new(
+                            Size::new(
+                                a_constraints.min.width.max(b_constraints.min.width),
+                                a_constraints.min.height + spacing + b_constraints.min.height,
+                            ),
+                            Size::new(
+                                a_constraints.max.width.min(b_constraints.max.width),
+                                a_constraints.max.height + spacing + b_constraints.max.height,
+                            ),
+                        ),
+                        Axis::Vertical => Constraints::new(
+                            Size::new(
+                                a_constraints.min.width + spacing + b_constraints.min.width,
+                                a_constraints.min.height.max(b_constraints.min.height),
+                            ),
+                            Size::new(
+                                a_constraints.max.width + spacing + b_constraints.max.width,
+                                a_constraints.max.height.min(b_constraints.max.height),
+                            ),
+                        ),
+                    }
+                }
+                .normalized();
+
+                ConstraintTree::Split {
+                    constraints,
+                    a: Box::new(a),
+                    b: Box::new(b),
+                }
+            }
+            Node::Pane(pane) => {
+                ConstraintTree::Pane(panes.get(pane).copied().unwrap_or_default().normalized())
+            }
+        }
+    }
+
     /// Returns the rectangular region for each [`Pane`] in the [`Node`] given
     /// the spacing between panes and the total available space.
     pub fn pane_regions(
@@ -124,6 +216,27 @@ impl Node {
                 height: bounds.height,
             },
             &count,
+            &mut regions,
+        );
+
+        regions
+    }
+
+    /// Returns the rectangular region for each [`Pane`] using pane-specific
+    /// size constraints.
+    pub fn pane_regions_with_constraints(
+        &self,
+        spacing: f32,
+        constraints: &BTreeMap<Pane, Constraints>,
+        bounds: Size,
+    ) -> BTreeMap<Pane, Rectangle> {
+        let mut regions = BTreeMap::new();
+        let constraints = self.constraints(constraints, spacing);
+
+        self.compute_constrained_regions(
+            spacing,
+            &Rectangle::new(crate::core::Point::ORIGIN, bounds),
+            &constraints,
             &mut regions,
         );
 
@@ -152,6 +265,26 @@ impl Node {
                 height: bounds.height,
             },
             &count,
+            &mut splits,
+        );
+
+        splits
+    }
+
+    /// Returns each split region using pane-specific size constraints.
+    pub fn split_regions_with_constraints(
+        &self,
+        spacing: f32,
+        constraints: &BTreeMap<Pane, Constraints>,
+        bounds: Size,
+    ) -> BTreeMap<Split, (Axis, Rectangle, f32)> {
+        let mut splits = BTreeMap::new();
+        let constraints = self.constraints(constraints, spacing);
+
+        self.compute_constrained_splits(
+            spacing,
+            &Rectangle::new(crate::core::Point::ORIGIN, bounds),
+            &constraints,
             &mut splits,
         );
 
@@ -217,6 +350,379 @@ impl Node {
             }
             Node::Pane(_) => false,
         }
+    }
+
+    pub(crate) fn resize_adjacent(
+        &mut self,
+        split: Split,
+        percentage: f32,
+        spacing: f32,
+        panes: &BTreeMap<Pane, Constraints>,
+        bounds: Size,
+    ) -> bool {
+        let Some((axis, region, _)) = self
+            .split_regions_with_constraints(spacing, panes, bounds)
+            .get(&split)
+            .copied()
+        else {
+            return false;
+        };
+        let percentage = if percentage.is_finite() {
+            percentage.clamp(0.0, 1.0)
+        } else {
+            0.5
+        };
+        let desired_position =
+            rectangle_origin(axis, &region) + rectangle_extent(axis, &region) * percentage;
+        let ancestors = self.same_axis_ancestors(split, axis);
+
+        if !self.resize_adjacent_once(split, percentage, spacing, panes, bounds) {
+            return false;
+        }
+
+        for (ancestor, branch) in ancestors {
+            let Some((_, target_region, target_ratio)) = self
+                .split_regions_with_constraints(spacing, panes, bounds)
+                .get(&split)
+                .copied()
+            else {
+                break;
+            };
+            let actual_position = split_position(axis, &target_region, target_ratio);
+            let remaining = desired_position - actual_position;
+            if remaining.abs() < 0.5 {
+                break;
+            }
+            if (remaining > 0.0 && branch != Branch::A) || (remaining < 0.0 && branch != Branch::B)
+            {
+                continue;
+            }
+
+            let Some((ancestor_axis, ancestor_region, ancestor_ratio)) = self
+                .split_regions_with_constraints(spacing, panes, bounds)
+                .get(&ancestor)
+                .copied()
+            else {
+                continue;
+            };
+            let ancestor_position = split_position(ancestor_axis, &ancestor_region, ancestor_ratio);
+            let requested_ratio = ratio_at_position(
+                ancestor_axis,
+                &ancestor_region,
+                ancestor_position + remaining,
+            );
+            let _ = self.resize_adjacent_once(ancestor, requested_ratio, spacing, panes, bounds);
+
+            let Some((target_axis, target_region, _)) = self
+                .split_regions_with_constraints(spacing, panes, bounds)
+                .get(&split)
+                .copied()
+            else {
+                break;
+            };
+            let requested_ratio = ratio_at_position(target_axis, &target_region, desired_position);
+            let _ = self.resize_adjacent_once(split, requested_ratio, spacing, panes, bounds);
+        }
+
+        true
+    }
+
+    fn resize_adjacent_once(
+        &mut self,
+        split: Split,
+        percentage: f32,
+        spacing: f32,
+        panes: &BTreeMap<Pane, Constraints>,
+        bounds: Size,
+    ) -> bool {
+        let constraints = self.constraints(panes, spacing);
+        let bounds = Rectangle::new(crate::core::Point::ORIGIN, bounds);
+        let mut snapshots = BTreeMap::new();
+        self.compute_constrained_snapshots(spacing, &bounds, &constraints, &mut snapshots);
+        self.resize_adjacent_inner(
+            split,
+            percentage,
+            spacing,
+            &bounds,
+            &constraints,
+            &snapshots,
+        )
+    }
+
+    fn same_axis_ancestors(&self, split: Split, axis: Axis) -> Vec<(Split, Branch)> {
+        let mut path = Vec::new();
+        if !self.split_path(split, &mut path) {
+            return Vec::new();
+        }
+        path.into_iter()
+            .rev()
+            .take_while(|(_, ancestor_axis, _)| *ancestor_axis == axis)
+            .map(|(ancestor, _, branch)| (ancestor, branch))
+            .collect()
+    }
+
+    fn split_path(&self, split: Split, path: &mut Vec<(Split, Axis, Branch)>) -> bool {
+        let Node::Split { id, axis, a, b, .. } = self else {
+            return false;
+        };
+        if *id == split {
+            return true;
+        }
+
+        path.push((*id, *axis, Branch::A));
+        if a.split_path(split, path) {
+            return true;
+        }
+        let _ = path.pop();
+
+        path.push((*id, *axis, Branch::B));
+        if b.split_path(split, path) {
+            return true;
+        }
+        let _ = path.pop();
+        false
+    }
+
+    fn resize_adjacent_inner(
+        &mut self,
+        split: Split,
+        percentage: f32,
+        spacing: f32,
+        current: &Rectangle,
+        constraints: &ConstraintTree,
+        snapshots: &BTreeMap<Split, SplitSnapshot>,
+    ) -> bool {
+        let (
+            Node::Split {
+                id,
+                axis,
+                ratio,
+                a,
+                b,
+            },
+            ConstraintTree::Split {
+                a: constraints_a,
+                b: constraints_b,
+                ..
+            },
+        ) = (self, constraints)
+        else {
+            return false;
+        };
+
+        let child_spacing = visible_spacing(
+            spacing,
+            constraints_a.constraints(),
+            constraints_b.constraints(),
+        );
+
+        if *id == split {
+            let a_constraints = boundary_extent_constraints(
+                a,
+                constraints_a,
+                *axis,
+                Boundary::End,
+                spacing,
+                snapshots,
+            );
+            let b_constraints = boundary_extent_constraints(
+                b,
+                constraints_b,
+                *axis,
+                Boundary::Start,
+                spacing,
+                snapshots,
+            );
+            let (region_a, region_b, actual_ratio) = split_with_extent_constraints(
+                *axis,
+                current,
+                percentage,
+                child_spacing,
+                a_constraints,
+                b_constraints,
+            );
+            *ratio = actual_ratio;
+            a.preserve_boundary(
+                *axis,
+                Boundary::End,
+                spacing,
+                &region_a,
+                constraints_a,
+                snapshots,
+            );
+            b.preserve_boundary(
+                *axis,
+                Boundary::Start,
+                spacing,
+                &region_b,
+                constraints_b,
+                snapshots,
+            );
+            return true;
+        }
+
+        let (region_a, region_b, _) = split_constrained(
+            *axis,
+            current,
+            *ratio,
+            child_spacing,
+            constraints_a.constraints(),
+            constraints_b.constraints(),
+        );
+        a.resize_adjacent_inner(
+            split,
+            percentage,
+            spacing,
+            &region_a,
+            constraints_a,
+            snapshots,
+        ) || b.resize_adjacent_inner(
+            split,
+            percentage,
+            spacing,
+            &region_b,
+            constraints_b,
+            snapshots,
+        )
+    }
+
+    fn preserve_boundary(
+        &mut self,
+        resized_axis: Axis,
+        boundary: Boundary,
+        spacing: f32,
+        current: &Rectangle,
+        constraints: &ConstraintTree,
+        snapshots: &BTreeMap<Split, SplitSnapshot>,
+    ) {
+        let (
+            Node::Split {
+                id,
+                axis,
+                ratio,
+                a,
+                b,
+            },
+            ConstraintTree::Split {
+                a: constraints_a,
+                b: constraints_b,
+                ..
+            },
+        ) = (self, constraints)
+        else {
+            return;
+        };
+
+        let child_spacing = visible_spacing(
+            spacing,
+            constraints_a.constraints(),
+            constraints_b.constraints(),
+        );
+        if *axis == resized_axis {
+            match boundary {
+                Boundary::Start if constraints_a.constraints().is_hidden() => {
+                    let (_, region_b, _) = split_constrained(
+                        *axis,
+                        current,
+                        *ratio,
+                        child_spacing,
+                        constraints_a.constraints(),
+                        constraints_b.constraints(),
+                    );
+                    b.preserve_boundary(
+                        resized_axis,
+                        boundary,
+                        spacing,
+                        &region_b,
+                        constraints_b,
+                        snapshots,
+                    );
+                    return;
+                }
+                Boundary::End if constraints_b.constraints().is_hidden() => {
+                    let (region_a, _, _) = split_constrained(
+                        *axis,
+                        current,
+                        *ratio,
+                        child_spacing,
+                        constraints_a.constraints(),
+                        constraints_b.constraints(),
+                    );
+                    a.preserve_boundary(
+                        resized_axis,
+                        boundary,
+                        spacing,
+                        &region_a,
+                        constraints_a,
+                        snapshots,
+                    );
+                    return;
+                }
+                Boundary::Start | Boundary::End => {}
+            }
+            let Some(snapshot) = snapshots.get(id) else {
+                return;
+            };
+            let available = rectangle_extent(resized_axis, current) - child_spacing;
+            let size_a = match boundary {
+                Boundary::Start => available - rectangle_extent(resized_axis, &snapshot.b),
+                Boundary::End => rectangle_extent(resized_axis, &snapshot.a),
+            };
+            let requested_ratio = ratio_for_extent(resized_axis, current, child_spacing, size_a);
+            let (region_a, region_b, actual_ratio) = split_constrained(
+                *axis,
+                current,
+                requested_ratio,
+                child_spacing,
+                constraints_a.constraints(),
+                constraints_b.constraints(),
+            );
+            *ratio = actual_ratio;
+            match boundary {
+                Boundary::Start => a.preserve_boundary(
+                    resized_axis,
+                    boundary,
+                    spacing,
+                    &region_a,
+                    constraints_a,
+                    snapshots,
+                ),
+                Boundary::End => b.preserve_boundary(
+                    resized_axis,
+                    boundary,
+                    spacing,
+                    &region_b,
+                    constraints_b,
+                    snapshots,
+                ),
+            }
+            return;
+        }
+
+        let (region_a, region_b, _) = split_constrained(
+            *axis,
+            current,
+            *ratio,
+            child_spacing,
+            constraints_a.constraints(),
+            constraints_b.constraints(),
+        );
+        a.preserve_boundary(
+            resized_axis,
+            boundary,
+            spacing,
+            &region_a,
+            constraints_a,
+            snapshots,
+        );
+        b.preserve_boundary(
+            resized_axis,
+            boundary,
+            spacing,
+            &region_b,
+            constraints_b,
+            snapshots,
+        );
     }
 
     pub(crate) fn remove(&mut self, pane: Pane) -> Option<Pane> {
@@ -341,6 +847,345 @@ impl Node {
             }
         }
     }
+
+    fn compute_constrained_regions(
+        &self,
+        spacing: f32,
+        current: &Rectangle,
+        constraints: &ConstraintTree,
+        regions: &mut BTreeMap<Pane, Rectangle>,
+    ) {
+        match (self, constraints) {
+            (
+                Node::Split {
+                    axis, ratio, a, b, ..
+                },
+                ConstraintTree::Split {
+                    a: constraints_a,
+                    b: constraints_b,
+                    ..
+                },
+            ) => {
+                let (region_a, region_b, _) = split_constrained(
+                    *axis,
+                    current,
+                    *ratio,
+                    visible_spacing(
+                        spacing,
+                        constraints_a.constraints(),
+                        constraints_b.constraints(),
+                    ),
+                    constraints_a.constraints(),
+                    constraints_b.constraints(),
+                );
+
+                a.compute_constrained_regions(spacing, &region_a, constraints_a, regions);
+                b.compute_constrained_regions(spacing, &region_b, constraints_b, regions);
+            }
+            (Node::Pane(pane), ConstraintTree::Pane(_)) => {
+                let _ = regions.insert(*pane, *current);
+            }
+            _ => unreachable!("Node configuration and constraints do not match"),
+        }
+    }
+
+    fn compute_constrained_splits(
+        &self,
+        spacing: f32,
+        current: &Rectangle,
+        constraints: &ConstraintTree,
+        splits: &mut BTreeMap<Split, (Axis, Rectangle, f32)>,
+    ) {
+        match (self, constraints) {
+            (
+                Node::Split {
+                    id,
+                    axis,
+                    ratio,
+                    a,
+                    b,
+                },
+                ConstraintTree::Split {
+                    a: constraints_a,
+                    b: constraints_b,
+                    ..
+                },
+            ) => {
+                let child_spacing = visible_spacing(
+                    spacing,
+                    constraints_a.constraints(),
+                    constraints_b.constraints(),
+                );
+                let (region_a, region_b, ratio) = split_constrained(
+                    *axis,
+                    current,
+                    *ratio,
+                    child_spacing,
+                    constraints_a.constraints(),
+                    constraints_b.constraints(),
+                );
+                if !constraints_a.constraints().is_hidden()
+                    && !constraints_b.constraints().is_hidden()
+                {
+                    let _ = splits.insert(*id, (*axis, *current, ratio));
+                }
+
+                a.compute_constrained_splits(spacing, &region_a, constraints_a, splits);
+                b.compute_constrained_splits(spacing, &region_b, constraints_b, splits);
+            }
+            (Node::Pane(_), ConstraintTree::Pane(_)) => {}
+            _ => unreachable!("Node configuration and constraints do not match"),
+        }
+    }
+
+    fn compute_constrained_snapshots(
+        &self,
+        spacing: f32,
+        current: &Rectangle,
+        constraints: &ConstraintTree,
+        snapshots: &mut BTreeMap<Split, SplitSnapshot>,
+    ) {
+        let (
+            Node::Split {
+                id,
+                axis,
+                ratio,
+                a,
+                b,
+            },
+            ConstraintTree::Split {
+                a: constraints_a,
+                b: constraints_b,
+                ..
+            },
+        ) = (self, constraints)
+        else {
+            return;
+        };
+
+        let child_spacing = visible_spacing(
+            spacing,
+            constraints_a.constraints(),
+            constraints_b.constraints(),
+        );
+        let (region_a, region_b, _) = split_constrained(
+            *axis,
+            current,
+            *ratio,
+            child_spacing,
+            constraints_a.constraints(),
+            constraints_b.constraints(),
+        );
+        let _ = snapshots.insert(
+            *id,
+            SplitSnapshot {
+                a: region_a,
+                b: region_b,
+            },
+        );
+        a.compute_constrained_snapshots(spacing, &region_a, constraints_a, snapshots);
+        b.compute_constrained_snapshots(spacing, &region_b, constraints_b, snapshots);
+    }
+}
+
+fn boundary_extent_constraints(
+    node: &Node,
+    constraints: &ConstraintTree,
+    resized_axis: Axis,
+    boundary: Boundary,
+    spacing: f32,
+    snapshots: &BTreeMap<Split, SplitSnapshot>,
+) -> ExtentConstraints {
+    let (
+        Node::Split { id, axis, a, b, .. },
+        ConstraintTree::Split {
+            a: constraints_a,
+            b: constraints_b,
+            ..
+        },
+    ) = (node, constraints)
+    else {
+        return constraint_extent(resized_axis, constraints.constraints());
+    };
+
+    let child_spacing = visible_spacing(
+        spacing,
+        constraints_a.constraints(),
+        constraints_b.constraints(),
+    );
+
+    if *axis == resized_axis {
+        match boundary {
+            Boundary::Start if constraints_a.constraints().is_hidden() => {
+                return boundary_extent_constraints(
+                    b,
+                    constraints_b,
+                    resized_axis,
+                    boundary,
+                    spacing,
+                    snapshots,
+                );
+            }
+            Boundary::End if constraints_b.constraints().is_hidden() => {
+                return boundary_extent_constraints(
+                    a,
+                    constraints_a,
+                    resized_axis,
+                    boundary,
+                    spacing,
+                    snapshots,
+                );
+            }
+            Boundary::Start | Boundary::End => {}
+        }
+        let Some(snapshot) = snapshots.get(id) else {
+            return constraint_extent(resized_axis, constraints.constraints());
+        };
+        return match boundary {
+            Boundary::Start => boundary_extent_constraints(
+                a,
+                constraints_a,
+                resized_axis,
+                boundary,
+                spacing,
+                snapshots,
+            )
+            .plus(rectangle_extent(resized_axis, &snapshot.b) + child_spacing),
+            Boundary::End => boundary_extent_constraints(
+                b,
+                constraints_b,
+                resized_axis,
+                boundary,
+                spacing,
+                snapshots,
+            )
+            .plus(rectangle_extent(resized_axis, &snapshot.a) + child_spacing),
+        };
+    }
+
+    let a =
+        boundary_extent_constraints(a, constraints_a, resized_axis, boundary, spacing, snapshots);
+    let b =
+        boundary_extent_constraints(b, constraints_b, resized_axis, boundary, spacing, snapshots);
+    ExtentConstraints {
+        min: a.min.max(b.min),
+        max: a.max.min(b.max),
+    }
+    .normalized()
+}
+
+impl ExtentConstraints {
+    fn plus(self, extent: f32) -> Self {
+        Self {
+            min: self.min + extent,
+            max: self.max + extent,
+        }
+    }
+
+    fn normalized(self) -> Self {
+        Self {
+            min: self.min.max(0.0),
+            max: self.max.max(self.min).max(0.0),
+        }
+    }
+}
+
+fn constraint_extent(axis: Axis, constraints: Constraints) -> ExtentConstraints {
+    match axis {
+        Axis::Horizontal => ExtentConstraints {
+            min: constraints.min.height,
+            max: constraints.max.height,
+        },
+        Axis::Vertical => ExtentConstraints {
+            min: constraints.min.width,
+            max: constraints.max.width,
+        },
+    }
+}
+
+fn rectangle_extent(axis: Axis, rectangle: &Rectangle) -> f32 {
+    match axis {
+        Axis::Horizontal => rectangle.height,
+        Axis::Vertical => rectangle.width,
+    }
+}
+
+fn rectangle_origin(axis: Axis, rectangle: &Rectangle) -> f32 {
+    match axis {
+        Axis::Horizontal => rectangle.y,
+        Axis::Vertical => rectangle.x,
+    }
+}
+
+fn split_position(axis: Axis, rectangle: &Rectangle, ratio: f32) -> f32 {
+    rectangle_origin(axis, rectangle) + rectangle_extent(axis, rectangle) * ratio
+}
+
+fn ratio_at_position(axis: Axis, rectangle: &Rectangle, position: f32) -> f32 {
+    let extent = rectangle_extent(axis, rectangle);
+    if extent > 0.0 {
+        ((position - rectangle_origin(axis, rectangle)) / extent).clamp(0.0, 1.0)
+    } else {
+        0.5
+    }
+}
+
+fn ratio_for_extent(axis: Axis, current: &Rectangle, spacing: f32, size_a: f32) -> f32 {
+    let extent = rectangle_extent(axis, current);
+    if extent > 0.0 {
+        (size_a + spacing / 2.0) / extent
+    } else {
+        0.5
+    }
+}
+
+fn split_with_extent_constraints(
+    axis: Axis,
+    current: &Rectangle,
+    ratio: f32,
+    spacing: f32,
+    a: ExtentConstraints,
+    b: ExtentConstraints,
+) -> (Rectangle, Rectangle, f32) {
+    axis.split_with_constraints(current, ratio, spacing, a.min, a.max, b.min, b.max)
+}
+
+fn visible_spacing(spacing: f32, a: Constraints, b: Constraints) -> f32 {
+    if a.is_hidden() || b.is_hidden() {
+        0.0
+    } else {
+        spacing
+    }
+}
+
+fn split_constrained(
+    axis: Axis,
+    current: &Rectangle,
+    ratio: f32,
+    spacing: f32,
+    a: Constraints,
+    b: Constraints,
+) -> (Rectangle, Rectangle, f32) {
+    match axis {
+        Axis::Horizontal => axis.split_with_constraints(
+            current,
+            ratio,
+            spacing,
+            a.min.height,
+            a.max.height,
+            b.min.height,
+            b.max.height,
+        ),
+        Axis::Vertical => axis.split_with_constraints(
+            current,
+            ratio,
+            spacing,
+            a.min.width,
+            a.max.width,
+            b.min.width,
+            b.max.width,
+        ),
+    }
 }
 
 impl std::hash::Hash for Node {
@@ -363,5 +1208,152 @@ impl std::hash::Hash for Node {
                 pane.hash(state);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const INNER: Split = Split(0);
+    const OUTER: Split = Split(1);
+
+    fn constraints() -> BTreeMap<Pane, Constraints> {
+        constraints_for(3)
+    }
+
+    fn constraints_for(count: usize) -> BTreeMap<Pane, Constraints> {
+        (0..count)
+            .map(|id| (Pane(id), Constraints::minimum(Size::new(100.0, 0.0))))
+            .collect()
+    }
+
+    fn widths(node: &Node) -> Vec<f32> {
+        let regions =
+            node.pane_regions_with_constraints(0.0, &constraints(), Size::new(900.0, 600.0));
+        (0..3).map(|id| regions[&Pane(id)].width).collect()
+    }
+
+    #[test]
+    fn resize_adjacent_preserves_non_adjacent_panes() {
+        let mut left_nested = Node::Split {
+            id: OUTER,
+            axis: Axis::Vertical,
+            ratio: 2.0 / 3.0,
+            a: Box::new(Node::Split {
+                id: INNER,
+                axis: Axis::Vertical,
+                ratio: 0.5,
+                a: Box::new(Node::Pane(Pane(0))),
+                b: Box::new(Node::Pane(Pane(1))),
+            }),
+            b: Box::new(Node::Pane(Pane(2))),
+        };
+
+        assert!(left_nested.resize_adjacent(
+            OUTER,
+            0.5,
+            0.0,
+            &constraints(),
+            Size::new(900.0, 600.0)
+        ));
+        assert_eq!(vec![300.0, 150.0, 450.0], widths(&left_nested));
+
+        let mut right_nested = Node::Split {
+            id: OUTER,
+            axis: Axis::Vertical,
+            ratio: 1.0 / 3.0,
+            a: Box::new(Node::Pane(Pane(0))),
+            b: Box::new(Node::Split {
+                id: INNER,
+                axis: Axis::Vertical,
+                ratio: 0.5,
+                a: Box::new(Node::Pane(Pane(1))),
+                b: Box::new(Node::Pane(Pane(2))),
+            }),
+        };
+
+        assert!(right_nested.resize_adjacent(
+            OUTER,
+            0.5,
+            0.0,
+            &constraints(),
+            Size::new(900.0, 600.0)
+        ));
+        assert_eq!(vec![450.0, 150.0, 300.0], widths(&right_nested));
+    }
+
+    #[test]
+    fn resize_adjacent_stops_at_the_adjacent_minimum() {
+        let mut node = Node::Split {
+            id: OUTER,
+            axis: Axis::Vertical,
+            ratio: 2.0 / 3.0,
+            a: Box::new(Node::Split {
+                id: INNER,
+                axis: Axis::Vertical,
+                ratio: 0.5,
+                a: Box::new(Node::Pane(Pane(0))),
+                b: Box::new(Node::Pane(Pane(1))),
+            }),
+            b: Box::new(Node::Pane(Pane(2))),
+        };
+
+        assert!(node.resize_adjacent(OUTER, 0.2, 0.0, &constraints(), Size::new(900.0, 600.0)));
+        assert_eq!(vec![300.0, 100.0, 500.0], widths(&node));
+    }
+
+    #[test]
+    fn resize_adjacent_pushes_the_next_pane_after_the_minimum() {
+        let mut node = Node::Split {
+            id: OUTER,
+            axis: Axis::Vertical,
+            ratio: 2.0 / 3.0,
+            a: Box::new(Node::Split {
+                id: INNER,
+                axis: Axis::Vertical,
+                ratio: 0.5,
+                a: Box::new(Node::Pane(Pane(0))),
+                b: Box::new(Node::Pane(Pane(1))),
+            }),
+            b: Box::new(Node::Pane(Pane(2))),
+        };
+
+        assert!(node.resize_adjacent(INNER, 0.9, 0.0, &constraints(), Size::new(900.0, 600.0)));
+        assert_eq!(vec![540.0, 100.0, 260.0], widths(&node));
+    }
+
+    #[test]
+    fn resize_adjacent_skips_hidden_boundary_panes() {
+        let root = Split(2);
+        let mut node = Node::Split {
+            id: root,
+            axis: Axis::Vertical,
+            ratio: 2.0 / 3.0,
+            a: Box::new(Node::Split {
+                id: OUTER,
+                axis: Axis::Vertical,
+                ratio: 1.0,
+                a: Box::new(Node::Split {
+                    id: INNER,
+                    axis: Axis::Vertical,
+                    ratio: 0.5,
+                    a: Box::new(Node::Pane(Pane(0))),
+                    b: Box::new(Node::Pane(Pane(1))),
+                }),
+                b: Box::new(Node::Pane(Pane(2))),
+            }),
+            b: Box::new(Node::Pane(Pane(3))),
+        };
+        let mut constraints = constraints_for(4);
+        let _ = constraints.insert(Pane(2), Constraints::fixed(Size::ZERO));
+
+        assert!(node.resize_adjacent(root, 0.5, 0.0, &constraints, Size::new(900.0, 600.0)));
+        let regions =
+            node.pane_regions_with_constraints(0.0, &constraints, Size::new(900.0, 600.0));
+        assert_eq!(300.0, regions[&Pane(0)].width);
+        assert_eq!(150.0, regions[&Pane(1)].width);
+        assert_eq!(0.0, regions[&Pane(2)].width);
+        assert_eq!(450.0, regions[&Pane(3)].width);
     }
 }
