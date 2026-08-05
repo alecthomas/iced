@@ -1,5 +1,7 @@
 use crate::core::Size;
 
+use super::Axis;
+
 /// Size constraints for a pane in a [`PaneGrid`].
 ///
 /// [`PaneGrid`]: super::PaneGrid
@@ -10,12 +12,20 @@ pub struct Constraints {
 
     /// The maximum size of the pane.
     pub max: Size,
+
+    pass_through_width: bool,
+    pass_through_height: bool,
 }
 
 impl Constraints {
     /// Creates pane constraints from minimum and maximum sizes.
     pub const fn new(min: Size, max: Size) -> Self {
-        Self { min, max }
+        Self {
+            min,
+            max,
+            pass_through_width: false,
+            pass_through_height: false,
+        }
     }
 
     /// Creates pane constraints with only a minimum size.
@@ -28,6 +38,18 @@ impl Constraints {
         Self::new(size, size)
     }
 
+    /// Makes the pane transparent to resize interactions on the given axis.
+    ///
+    /// The pane keeps its constrained size while dragging its boundary resizes
+    /// the nearest non-pass-through panes on either side.
+    pub const fn pass_through(mut self, axis: Axis) -> Self {
+        match axis {
+            Axis::Horizontal => self.pass_through_height = true,
+            Axis::Vertical => self.pass_through_width = true,
+        }
+        self
+    }
+
     pub(crate) fn normalized(self) -> Self {
         let min = Size::new(
             normalize_min(self.min.width),
@@ -38,11 +60,26 @@ impl Constraints {
             normalize_max(self.max.height, min.height),
         );
 
-        Self { min, max }
+        Self { min, max, ..self }
     }
 
     pub(crate) fn is_hidden(self) -> bool {
         self.max.width == 0.0 && self.max.height == 0.0
+    }
+
+    pub(crate) fn passes_resize(self, axis: Axis) -> bool {
+        match axis {
+            Axis::Horizontal => self.pass_through_height,
+            Axis::Vertical => self.pass_through_width,
+        }
+    }
+
+    pub(crate) fn for_resize(self, axis: Axis) -> Self {
+        if self.passes_resize(axis) {
+            Self::fixed(Size::ZERO)
+        } else {
+            self
+        }
     }
 }
 

@@ -693,20 +693,24 @@ where
                     if let Some((axis, rectangle, _)) = splits.get(&split)
                         && let Some(cursor_position) = cursor.position()
                     {
+                        let position = match axis {
+                            Axis::Horizontal => cursor_position.y - bounds.y,
+                            Axis::Vertical => cursor_position.x - bounds.x,
+                        };
                         let ratio = match axis {
                             Axis::Horizontal => {
-                                let position = cursor_position.y - bounds.y - rectangle.y;
-
-                                (position / rectangle.height).clamp(0.0, 1.0)
+                                ((position - rectangle.y) / rectangle.height).clamp(0.0, 1.0)
                             }
                             Axis::Vertical => {
-                                let position = cursor_position.x - bounds.x - rectangle.x;
-
-                                (position / rectangle.width).clamp(0.0, 1.0)
+                                ((position - rectangle.x) / rectangle.width).clamp(0.0, 1.0)
                             }
                         };
 
-                        let event = ResizeEvent { split, ratio };
+                        let event = ResizeEvent {
+                            split,
+                            ratio,
+                            position,
+                        };
 
                         if let Some((_, on_resize)) = &self.on_resize {
                             shell.publish(on_resize(event));
@@ -1253,6 +1257,13 @@ pub struct ResizeEvent {
     /// The ratio is a value in [0, 1], representing the exact position of a
     /// [`Split`] between two panes.
     pub ratio: f32,
+
+    /// The unclamped cursor position along the split axis, relative to the
+    /// [`PaneGrid`] bounds.
+    ///
+    /// Unlike [`Self::ratio`], this position can move beyond the split's own
+    /// region so fixed pass-through panes can proxy a more distant boundary.
+    pub position: f32,
 }
 
 /// An event produced during a complete resize interaction of a [`PaneGrid`].

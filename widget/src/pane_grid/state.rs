@@ -2,7 +2,9 @@
 //!
 //! [`PaneGrid`]: super::PaneGrid
 use crate::core::{Point, Size};
-use crate::pane_grid::{Axis, Configuration, Direction, Edge, Node, Pane, Region, Split, Target};
+use crate::pane_grid::{
+    Axis, Configuration, Direction, Edge, Node, Pane, Region, ResizeEvent, Split, Target,
+};
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -283,23 +285,26 @@ impl<T> State<T> {
         let _ = self.internal.layout.resize(split, ratio);
     }
 
-    /// Resizes only the panes adjacent to the provided [`Split`].
+    /// Resizes only the panes adjacent to the provided split.
     ///
     /// Unlike [`Self::resize`], nested panes outside the dragged boundary keep
-    /// their current size. The split stops when an adjacent pane reaches its
-    /// constraints.
+    /// their current size. The boundary stops when an adjacent pane reaches
+    /// its constraints, and passes through panes configured with
+    /// [`Constraints::pass_through`](crate::pane_grid::Constraints::pass_through).
     pub fn resize_adjacent(
         &mut self,
-        split: Split,
-        ratio: f32,
+        event: ResizeEvent,
         spacing: f32,
         constraints: &BTreeMap<Pane, crate::pane_grid::Constraints>,
         bounds: Size,
     ) {
-        let _ = self
-            .internal
-            .layout
-            .resize_adjacent(split, ratio, spacing, constraints, bounds);
+        let _ = self.internal.layout.resize_adjacent_at(
+            event.split,
+            event.position,
+            spacing,
+            constraints,
+            bounds,
+        );
     }
 
     /// Closes the given [`Pane`] and returns its internal state and its closest

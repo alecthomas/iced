@@ -73,7 +73,7 @@ impl Example {
             Message::Clicked(pane) => {
                 self.focus = Some(pane);
             }
-            Message::Resized(pane_grid::ResizeEvent { split, ratio }) => {
+            Message::Resized(pane_grid::ResizeEvent { split, ratio, .. }) => {
                 self.panes.resize(split, ratio);
             }
             Message::Dragged(pane_grid::DragEvent::Dropped { pane, target }) => {
