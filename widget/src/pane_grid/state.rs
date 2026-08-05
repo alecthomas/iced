@@ -289,8 +289,8 @@ impl<T> State<T> {
     ///
     /// Unlike [`Self::resize`], nested panes outside the dragged boundary keep
     /// their current size. The boundary stops when an adjacent pane reaches
-    /// its constraints, and passes through panes configured with
-    /// [`Constraints::pass_through`](crate::pane_grid::Constraints::pass_through).
+    /// its constraints, and passes through panes whose minimum and maximum
+    /// sizes match on the resize axis.
     pub fn resize_adjacent(
         &mut self,
         event: ResizeEvent,

@@ -152,10 +152,10 @@ impl Node {
                 let b = b.constraints(panes, spacing);
                 let a_constraints = a.constraints();
                 let b_constraints = b.constraints();
-                let spacing = visible_spacing(spacing, a_constraints, b_constraints);
-                let constraints = if a_constraints.is_hidden() {
+                let spacing = visible_spacing(*axis, spacing, a_constraints, b_constraints);
+                let constraints = if a_constraints.is_hidden(*axis) {
                     b_constraints
-                } else if b_constraints.is_hidden() {
+                } else if b_constraints.is_hidden(*axis) {
                     a_constraints
                 } else {
                     match axis {
@@ -491,42 +491,48 @@ impl Node {
     }
 
     fn same_axis_ancestors(&self, split: Split, axis: Axis) -> Vec<(Split, Branch)> {
-        let mut path = Vec::new();
-        if !self.split_path(split, &mut path) {
-            return Vec::new();
-        }
-        path.into_iter()
-            .rev()
-            .take_while(|(_, ancestor_axis, _)| *ancestor_axis == axis)
+        self.ancestors(split)
+            .into_iter()
+            .filter(|(_, ancestor_axis, _)| *ancestor_axis == axis)
             .map(|(ancestor, _, branch)| (ancestor, branch))
             .collect()
     }
 
+    fn ancestors(&self, split: Split) -> Vec<(Split, Axis, Branch)> {
+        let mut path = Vec::new();
+        if !self.split_path(split, &mut path) {
+            return Vec::new();
+        }
+        path.into_iter().rev().collect()
+    }
+
     fn resize_proxy(&self, split: Split, axis: Axis, panes: &BTreeMap<Pane, Constraints>) -> Split {
-        let Some((a_passes, b_passes)) = self.split_pass_through_sides(split, axis, panes) else {
+        let Some((a_fixed, b_fixed)) = self.split_fixed_sides(split, axis, panes) else {
             return split;
         };
-        let pass_through_branch = match (a_passes, b_passes) {
+        let fixed_branch = match (a_fixed, b_fixed) {
             (true, false) => Branch::A,
             (false, true) => Branch::B,
             _ => return split,
         };
 
-        self.same_axis_ancestors(split, axis)
+        self.ancestors(split)
             .into_iter()
+            .filter(|(_, ancestor_axis, _)| *ancestor_axis == axis)
+            .map(|(ancestor, _, branch)| (ancestor, branch))
             .find_map(|(ancestor, branch)| {
-                let crosses_pass_through = matches!(
-                    (pass_through_branch, branch),
+                let crosses_fixed = matches!(
+                    (fixed_branch, branch),
                     (Branch::A, Branch::B) | (Branch::B, Branch::A)
                 );
-                (crosses_pass_through
+                (crosses_fixed
                     && self.opposite_has_resize_target(ancestor, branch, axis, panes))
                 .then_some(ancestor)
             })
             .unwrap_or(split)
     }
 
-    fn split_pass_through_sides(
+    fn split_fixed_sides(
         &self,
         split: Split,
         axis: Axis,
@@ -534,11 +540,11 @@ impl Node {
     ) -> Option<(bool, bool)> {
         match self {
             Node::Split { id, a, b, .. } if *id == split => {
-                Some((a.passes_resize(axis, panes), b.passes_resize(axis, panes)))
+                Some((a.is_fixed(axis, panes), b.is_fixed(axis, panes)))
             }
             Node::Split { a, b, .. } => a
-                .split_pass_through_sides(split, axis, panes)
-                .or_else(|| b.split_pass_through_sides(split, axis, panes)),
+                .split_fixed_sides(split, axis, panes)
+                .or_else(|| b.split_fixed_sides(split, axis, panes)),
             Node::Pane(_) => None,
         }
     }
@@ -552,8 +558,8 @@ impl Node {
     ) -> bool {
         match self {
             Node::Split { id, a, b, .. } if *id == split => match branch {
-                Branch::A => !b.passes_resize(axis, panes),
-                Branch::B => !a.passes_resize(axis, panes),
+                Branch::A => !b.is_fixed(axis, panes),
+                Branch::B => !a.is_fixed(axis, panes),
             },
             Node::Split { a, b, .. } => {
                 a.opposite_has_resize_target(split, branch, axis, panes)
@@ -563,15 +569,15 @@ impl Node {
         }
     }
 
-    fn passes_resize(&self, axis: Axis, panes: &BTreeMap<Pane, Constraints>) -> bool {
+    fn is_fixed(&self, axis: Axis, panes: &BTreeMap<Pane, Constraints>) -> bool {
         match self {
             Node::Pane(pane) => panes
                 .get(pane)
                 .copied()
                 .unwrap_or_default()
-                .passes_resize(axis),
+                .is_fixed(axis),
             Node::Split { a, b, .. } => {
-                a.passes_resize(axis, panes) && b.passes_resize(axis, panes)
+                a.is_fixed(axis, panes) && b.is_fixed(axis, panes)
             }
         }
     }
@@ -626,6 +632,7 @@ impl Node {
         };
 
         let child_spacing = visible_spacing(
+            *axis,
             spacing,
             constraints_a.constraints(),
             constraints_b.constraints(),
@@ -729,13 +736,14 @@ impl Node {
         };
 
         let child_spacing = visible_spacing(
+            *axis,
             spacing,
             constraints_a.constraints(),
             constraints_b.constraints(),
         );
         if *axis == resized_axis {
             match boundary {
-                Boundary::Start if constraints_a.constraints().is_hidden() => {
+                Boundary::Start if constraints_a.constraints().is_hidden(*axis) => {
                     let (_, region_b, _) = split_constrained(
                         *axis,
                         current,
@@ -754,7 +762,7 @@ impl Node {
                     );
                     return;
                 }
-                Boundary::End if constraints_b.constraints().is_hidden() => {
+                Boundary::End if constraints_b.constraints().is_hidden(*axis) => {
                     let (region_a, _, _) = split_constrained(
                         *axis,
                         current,
@@ -986,6 +994,7 @@ impl Node {
                     current,
                     *ratio,
                     visible_spacing(
+                        *axis,
                         spacing,
                         constraints_a.constraints(),
                         constraints_b.constraints(),
@@ -1027,6 +1036,7 @@ impl Node {
                 },
             ) => {
                 let child_spacing = visible_spacing(
+                    *axis,
                     spacing,
                     constraints_a.constraints(),
                     constraints_b.constraints(),
@@ -1039,8 +1049,8 @@ impl Node {
                     constraints_a.constraints(),
                     constraints_b.constraints(),
                 );
-                if !constraints_a.constraints().is_hidden()
-                    && !constraints_b.constraints().is_hidden()
+                if !constraints_a.constraints().is_hidden(*axis)
+                    && !constraints_b.constraints().is_hidden(*axis)
                 {
                     let _ = splits.insert(*id, (*axis, *current, ratio));
                 }
@@ -1079,6 +1089,7 @@ impl Node {
         };
 
         let child_spacing = visible_spacing(
+            *axis,
             spacing,
             constraints_a.constraints(),
             constraints_b.constraints(),
@@ -1124,6 +1135,7 @@ fn boundary_extent_constraints(
     };
 
     let child_spacing = visible_spacing(
+        *axis,
         spacing,
         constraints_a.constraints(),
         constraints_b.constraints(),
@@ -1131,7 +1143,7 @@ fn boundary_extent_constraints(
 
     if *axis == resized_axis {
         match boundary {
-            Boundary::Start if constraints_a.constraints().is_hidden() => {
+            Boundary::Start if constraints_a.constraints().is_hidden(*axis) => {
                 return boundary_extent_constraints(
                     b,
                     constraints_b,
@@ -1141,7 +1153,7 @@ fn boundary_extent_constraints(
                     snapshots,
                 );
             }
-            Boundary::End if constraints_b.constraints().is_hidden() => {
+            Boundary::End if constraints_b.constraints().is_hidden(*axis) => {
                 return boundary_extent_constraints(
                     a,
                     constraints_a,
@@ -1265,8 +1277,8 @@ fn split_with_extent_constraints(
     axis.split_with_constraints(current, ratio, spacing, a.min, a.max, b.min, b.max)
 }
 
-fn visible_spacing(spacing: f32, a: Constraints, b: Constraints) -> f32 {
-    if a.is_hidden() || b.is_hidden() {
+fn visible_spacing(axis: Axis, spacing: f32, a: Constraints, b: Constraints) -> f32 {
+    if a.is_hidden(axis) || b.is_hidden(axis) {
         0.0
     } else {
         spacing
@@ -1439,6 +1451,61 @@ mod tests {
     }
 
     #[test]
+    fn resize_adjacent_pushes_past_perpendicular_ancestors_after_the_minimum() {
+        for (name, axis, size) in [
+            ("Width", Axis::Vertical, Size::new(900.0, 600.0)),
+            ("Height", Axis::Horizontal, Size::new(900.0, 600.0)),
+        ] {
+            let perpendicular = match axis {
+                Axis::Horizontal => Axis::Vertical,
+                Axis::Vertical => Axis::Horizontal,
+            };
+            let mut node = Node::Split {
+                id: OUTER,
+                axis,
+                ratio: 1.0 / 3.0,
+                a: Box::new(Node::Pane(Pane(0))),
+                b: Box::new(Node::Split {
+                    id: Split(2),
+                    axis: perpendicular,
+                    ratio: 0.5,
+                    a: Box::new(Node::Split {
+                        id: INNER,
+                        axis,
+                        ratio: 0.5,
+                        a: Box::new(Node::Pane(Pane(1))),
+                        b: Box::new(Node::Pane(Pane(2))),
+                    }),
+                    b: Box::new(Node::Pane(Pane(3))),
+                }),
+            };
+            let minimum = match axis {
+                Axis::Horizontal => Constraints::minimum(Size::new(0.0, 100.0)),
+                Axis::Vertical => Constraints::minimum(Size::new(100.0, 0.0)),
+            };
+            let constraints = (0..4).map(|id| (Pane(id), minimum)).collect();
+            let before = node.pane_regions_with_constraints(0.0, &constraints, size);
+            let boundary = rectangle_end(axis, &before[&Pane(1)]);
+
+            assert!(node.resize_adjacent_at(
+                INNER,
+                boundary - 300.0,
+                0.0,
+                &constraints,
+                size
+            ));
+
+            let after = node.pane_regions_with_constraints(0.0, &constraints, size);
+            assert_close(100.0, rectangle_extent(axis, &after[&Pane(1)]), name);
+            assert_close(
+                rectangle_extent(axis, &before[&Pane(0)]) - 100.0,
+                rectangle_extent(axis, &after[&Pane(0)]),
+                name,
+            );
+        }
+    }
+
+    #[test]
     fn resize_adjacent_skips_hidden_boundary_panes() {
         let root = Split(2);
         let mut node = Node::Split {
@@ -1483,7 +1550,7 @@ mod tests {
                 Axis::Vertical => Axis::Horizontal,
             };
             let root = Split(2);
-            let mut node = Node::Split {
+            let node = Node::Split {
                 id: root,
                 axis,
                 ratio: 2.0 / 3.0,
@@ -1513,8 +1580,7 @@ mod tests {
                 Axis::Vertical => {
                     Constraints::new(Size::new(30.0, 0.0), Size::new(30.0, f32::INFINITY))
                 }
-            }
-            .pass_through(axis);
+            };
             let constraints = [
                 (Pane(0), expanded),
                 (Pane(1), rail),
@@ -1523,6 +1589,37 @@ mod tests {
             ]
             .into_iter()
             .collect();
+
+            let mut flexible_node = node.clone();
+            let mut flexible_constraints = constraints.clone();
+            let _ = flexible_constraints.insert(Pane(1), expanded);
+            let before = flexible_node.pane_regions_with_constraints(
+                0.0,
+                &flexible_constraints,
+                size,
+            );
+            let boundary = rectangle_end(axis, &before[&Pane(0)]);
+
+            assert!(flexible_node.resize_adjacent_at(
+                INNER,
+                boundary - 100.0,
+                0.0,
+                &flexible_constraints,
+                size
+            ));
+
+            let after = flexible_node.pane_regions_with_constraints(
+                0.0,
+                &flexible_constraints,
+                size,
+            );
+            assert_close(
+                rectangle_extent(axis, &before[&Pane(3)]),
+                rectangle_extent(axis, &after[&Pane(3)]),
+                name,
+            );
+
+            let mut node = node;
             let before = node.pane_regions_with_constraints(0.0, &constraints, size);
             let boundary = rectangle_end(axis, &before[&Pane(0)]);
 
@@ -1541,6 +1638,173 @@ mod tests {
             );
             assert_close(30.0, rectangle_extent(axis, &after[&Pane(1)]), name);
             assert_close(30.0, rectangle_extent(axis, &after[&Pane(2)]), name);
+        }
+    }
+
+    #[test]
+    fn resize_adjacent_passes_through_perpendicular_ancestors() {
+        for (name, axis, size) in [
+            ("Width", Axis::Vertical, Size::new(900.0, 600.0)),
+            ("Height", Axis::Horizontal, Size::new(900.0, 600.0)),
+        ] {
+            let perpendicular = match axis {
+                Axis::Horizontal => Axis::Vertical,
+                Axis::Vertical => Axis::Horizontal,
+            };
+            let mut node = Node::Split {
+                id: Split(3),
+                axis,
+                ratio: 2.0 / 3.0,
+                a: Box::new(Node::Split {
+                    id: Split(2),
+                    axis: perpendicular,
+                    ratio: 0.7,
+                    a: Box::new(Node::Split {
+                        id: INNER,
+                        axis,
+                        ratio: 0.95,
+                        a: Box::new(Node::Pane(Pane(0))),
+                        b: Box::new(Node::Pane(Pane(1))),
+                    }),
+                    b: Box::new(Node::Pane(Pane(2))),
+                }),
+                b: Box::new(Node::Pane(Pane(3))),
+            };
+            let expanded = match axis {
+                Axis::Horizontal => Constraints::minimum(Size::new(0.0, 100.0)),
+                Axis::Vertical => Constraints::minimum(Size::new(100.0, 0.0)),
+            };
+            let rail = match axis {
+                Axis::Horizontal => {
+                    Constraints::new(Size::new(0.0, 30.0), Size::new(f32::INFINITY, 30.0))
+                }
+                Axis::Vertical => {
+                    Constraints::new(Size::new(30.0, 0.0), Size::new(30.0, f32::INFINITY))
+                }
+            };
+            let perpendicular_rail = match perpendicular {
+                Axis::Horizontal => {
+                    Constraints::new(Size::new(0.0, 30.0), Size::new(f32::INFINITY, 30.0))
+                }
+                Axis::Vertical => {
+                    Constraints::new(Size::new(30.0, 0.0), Size::new(30.0, f32::INFINITY))
+                }
+            };
+            let constraints = [
+                (Pane(0), expanded),
+                (Pane(1), rail),
+                (Pane(2), perpendicular_rail),
+                (Pane(3), expanded),
+            ]
+            .into_iter()
+            .collect();
+            let before = node.pane_regions_with_constraints(0.0, &constraints, size);
+            let boundary = rectangle_end(axis, &before[&Pane(0)]);
+
+            assert!(node.resize_adjacent_at(
+                INNER,
+                boundary - 100.0,
+                0.0,
+                &constraints,
+                size
+            ));
+
+            let after = node.pane_regions_with_constraints(0.0, &constraints, size);
+            assert_close(
+                rectangle_extent(axis, &before[&Pane(0)]) - 100.0,
+                rectangle_extent(axis, &after[&Pane(0)]),
+                name,
+            );
+            assert_close(
+                rectangle_extent(axis, &before[&Pane(3)]) + 100.0,
+                rectangle_extent(axis, &after[&Pane(3)]),
+                name,
+            );
+            assert_close(30.0, rectangle_extent(axis, &after[&Pane(1)]), name);
+            assert_close(
+                30.0,
+                rectangle_extent(perpendicular, &after[&Pane(2)]),
+                name,
+            );
+        }
+    }
+
+    #[test]
+    fn resize_adjacent_moves_both_edges_of_a_near_side_fixed_rail() {
+        for (name, axis, size) in [
+            ("Width", Axis::Vertical, Size::new(900.0, 600.0)),
+            ("Height", Axis::Horizontal, Size::new(900.0, 600.0)),
+        ] {
+            let perpendicular = match axis {
+                Axis::Horizontal => Axis::Vertical,
+                Axis::Vertical => Axis::Horizontal,
+            };
+            let node = Node::Split {
+                id: OUTER,
+                axis,
+                ratio: 1.0 / 3.0,
+                a: Box::new(Node::Pane(Pane(0))),
+                b: Box::new(Node::Split {
+                    id: Split(2),
+                    axis: perpendicular,
+                    ratio: 0.95,
+                    a: Box::new(Node::Split {
+                        id: INNER,
+                        axis,
+                        ratio: 0.05,
+                        a: Box::new(Node::Pane(Pane(1))),
+                        b: Box::new(Node::Pane(Pane(2))),
+                    }),
+                    b: Box::new(Node::Pane(Pane(3))),
+                }),
+            };
+            let expanded = match axis {
+                Axis::Horizontal => Constraints::minimum(Size::new(0.0, 100.0)),
+                Axis::Vertical => Constraints::minimum(Size::new(100.0, 0.0)),
+            };
+            let rail = match axis {
+                Axis::Horizontal => {
+                    Constraints::new(Size::new(0.0, 30.0), Size::new(f32::INFINITY, 30.0))
+                }
+                Axis::Vertical => {
+                    Constraints::new(Size::new(30.0, 0.0), Size::new(30.0, f32::INFINITY))
+                }
+            };
+            let perpendicular_rail = match perpendicular {
+                Axis::Horizontal => {
+                    Constraints::new(Size::new(0.0, 30.0), Size::new(f32::INFINITY, 30.0))
+                }
+                Axis::Vertical => {
+                    Constraints::new(Size::new(30.0, 0.0), Size::new(30.0, f32::INFINITY))
+                }
+            };
+            let constraints = [
+                (Pane(0), expanded),
+                (Pane(1), rail),
+                (Pane(2), expanded),
+                (Pane(3), perpendicular_rail),
+            ]
+            .into_iter()
+            .collect();
+            let before = node.pane_regions_with_constraints(0.0, &constraints, size);
+            let outer_edge = rectangle_end(axis, &before[&Pane(0)]);
+            let inner_edge = rectangle_end(axis, &before[&Pane(1)]);
+
+            for (edge, split, position) in [
+                ("Outer", OUTER, outer_edge + 100.0),
+                ("Inner", INNER, inner_edge + 100.0),
+            ] {
+                let mut resized = node.clone();
+                assert!(resized.resize_adjacent_at(split, position, 0.0, &constraints, size));
+
+                let after = resized.pane_regions_with_constraints(0.0, &constraints, size);
+                assert_close(
+                    rectangle_extent(axis, &before[&Pane(0)]) + 100.0,
+                    rectangle_extent(axis, &after[&Pane(0)]),
+                    edge,
+                );
+                assert_close(30.0, rectangle_extent(axis, &after[&Pane(1)]), name);
+            }
         }
     }
 
