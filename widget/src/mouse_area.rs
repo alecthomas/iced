@@ -33,6 +33,10 @@ impl<'a, Message, Theme, Renderer> MouseArea<'a, Message, Theme, Renderer> {
     }
 
     /// The message to emit on a left button release.
+    ///
+    /// Only a release that completes a press this area received counts,
+    /// so a press that reshuffles the layout cannot turn its own release
+    /// into a click on whatever slid under the cursor.
     #[must_use]
     pub fn on_release(mut self, message: Message) -> Self {
         self.on_release = Some(message);
@@ -62,7 +66,10 @@ impl<'a, Message, Theme, Renderer> MouseArea<'a, Message, Theme, Renderer> {
         self
     }
 
-    /// The message to emit on a right button release.
+    /// The message to emit on a right button release, subject to the same
+    /// matching press requirement as [`on_release`].
+    ///
+    /// [`on_release`]: Self::on_release
     #[must_use]
     pub fn on_right_release(mut self, message: Message) -> Self {
         self.on_right_release = Some(message);
@@ -76,7 +83,10 @@ impl<'a, Message, Theme, Renderer> MouseArea<'a, Message, Theme, Renderer> {
         self
     }
 
-    /// The message to emit on a middle button release.
+    /// The message to emit on a middle button release, subject to the same
+    /// matching press requirement as [`on_release`].
+    ///
+    /// [`on_release`]: Self::on_release
     #[must_use]
     pub fn on_middle_release(mut self, message: Message) -> Self {
         self.on_middle_release = Some(message);
@@ -126,6 +136,16 @@ struct State {
     bounds: Rectangle,
     cursor_position: Option<Point>,
     previous_click: Option<mouse::Click>,
+    pressed: Pressed,
+}
+
+/// The buttons whose press this area received, so that a release can be
+/// told apart from the tail of a press some other widget owns.
+#[derive(Default)]
+struct Pressed {
+    left: bool,
+    right: bool,
+    middle: bool,
 }
 
 impl<'a, Message, Theme, Renderer> MouseArea<'a, Message, Theme, Renderer> {
@@ -298,6 +318,18 @@ where
     }
 }
 
+/// The button an [`Event`] ends the press of, if any. Touch shares the
+/// left button's bookkeeping, as its press does.
+fn released_button(event: &Event) -> Option<mouse::Button> {
+    match event {
+        Event::Mouse(mouse::Event::ButtonReleased(button)) => Some(*button),
+        Event::Touch(touch::Event::FingerLifted { .. } | touch::Event::FingerLost { .. }) => {
+            Some(mouse::Button::Left)
+        }
+        _ => None,
+    }
+}
+
 /// Processes the given [`Event`] and updates the [`State`] of an [`MouseArea`]
 /// accordingly.
 fn update<Message: Clone, Theme, Renderer>(
@@ -340,6 +372,40 @@ fn update<Message: Clone, Theme, Renderer>(
         }
     }
 
+    // Releases are handled wherever the cursor is, so that a press ending
+    // outside the area is forgotten instead of lingering and making some
+    // later, unrelated release look like the end of a click.
+    if let Some(button) = released_button(event) {
+        let (was_pressed, on_release) = match button {
+            mouse::Button::Left => (
+                std::mem::take(&mut state.pressed.left),
+                widget.on_release.as_ref(),
+            ),
+            mouse::Button::Right => (
+                std::mem::take(&mut state.pressed.right),
+                widget.on_right_release.as_ref(),
+            ),
+            mouse::Button::Middle => (
+                std::mem::take(&mut state.pressed.middle),
+                widget.on_middle_release.as_ref(),
+            ),
+            _ => return,
+        };
+
+        // A lost finger cancels the touch rather than completing it.
+        let completed = !matches!(event, Event::Touch(touch::Event::FingerLost { .. }));
+
+        if was_pressed
+            && completed
+            && cursor.is_over(layout.bounds())
+            && let Some(message) = on_release
+        {
+            shell.publish(message.clone());
+        }
+
+        return;
+    }
+
     if !cursor.is_over(layout.bounds()) {
         return;
     }
@@ -347,6 +413,8 @@ fn update<Message: Clone, Theme, Renderer>(
     match event {
         Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
         | Event::Touch(touch::Event::FingerPressed { .. }) => {
+            state.pressed.left = true;
+
             if let Some(message) = widget.on_press.as_ref() {
                 shell.publish(message.clone());
                 shell.capture_event();
@@ -369,32 +437,20 @@ fn update<Message: Clone, Theme, Renderer>(
                 shell.capture_event();
             }
         }
-        Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
-        | Event::Touch(touch::Event::FingerLifted { .. }) => {
-            if let Some(message) = widget.on_release.as_ref() {
-                shell.publish(message.clone());
-            }
-        }
         Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)) => {
+            state.pressed.right = true;
+
             if let Some(message) = widget.on_right_press.as_ref() {
                 shell.publish(message.clone());
                 shell.capture_event();
             }
         }
-        Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Right)) => {
-            if let Some(message) = widget.on_right_release.as_ref() {
-                shell.publish(message.clone());
-            }
-        }
         Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Middle)) => {
+            state.pressed.middle = true;
+
             if let Some(message) = widget.on_middle_press.as_ref() {
                 shell.publish(message.clone());
                 shell.capture_event();
-            }
-        }
-        Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Middle)) => {
-            if let Some(message) = widget.on_middle_release.as_ref() {
-                shell.publish(message.clone());
             }
         }
         Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
