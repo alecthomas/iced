@@ -374,13 +374,13 @@ impl Node {
         };
         let desired_position =
             rectangle_origin(axis, &region) + rectangle_extent(axis, &region) * percentage;
-        let ancestors = self.same_axis_ancestors(split, axis);
+        let carriers = self.resize_carriers(split, axis, spacing, panes, bounds);
 
         if !self.resize_adjacent_once(split, percentage, spacing, panes, bounds) {
             return false;
         }
 
-        for (ancestor, branch) in ancestors {
+        for (carrier, branch) in carriers {
             let Some((_, target_region, target_ratio)) = self
                 .split_regions_with_constraints(spacing, panes, bounds)
                 .get(&split)
@@ -398,20 +398,17 @@ impl Node {
                 continue;
             }
 
-            let Some((ancestor_axis, ancestor_region, ancestor_ratio)) = self
+            let Some((carrier_axis, carrier_region, carrier_ratio)) = self
                 .split_regions_with_constraints(spacing, panes, bounds)
-                .get(&ancestor)
+                .get(&carrier)
                 .copied()
             else {
                 continue;
             };
-            let ancestor_position = split_position(ancestor_axis, &ancestor_region, ancestor_ratio);
-            let requested_ratio = ratio_at_position(
-                ancestor_axis,
-                &ancestor_region,
-                ancestor_position + remaining,
-            );
-            let _ = self.resize_adjacent_once(ancestor, requested_ratio, spacing, panes, bounds);
+            let carrier_position = split_position(carrier_axis, &carrier_region, carrier_ratio);
+            let requested_ratio =
+                ratio_at_position(carrier_axis, &carrier_region, carrier_position + remaining);
+            let _ = self.resize_adjacent_once(carrier, requested_ratio, spacing, panes, bounds);
 
             let Some((target_axis, target_region, _)) = self
                 .split_regions_with_constraints(spacing, panes, bounds)
@@ -490,6 +487,85 @@ impl Node {
         )
     }
 
+    /// Splits that can absorb drag distance the resized `split` could not
+    /// fulfil, ordered from the boundary outwards.
+    ///
+    /// A boundary only resizes the panes immediately next to it, so a drag
+    /// that pins those panes at their minimum has to hand the leftover
+    /// distance to the next boundary along the axis. That boundary is a
+    /// descendant whenever the neighbouring pane is itself split — a rail
+    /// stacked over a pane, say — and an ancestor once the resized subtree is
+    /// exhausted. `Branch::A` marks a carrier that sits after the boundary and
+    /// so absorbs forward drags; `Branch::B` marks one that sits before it.
+    fn resize_carriers(
+        &self,
+        split: Split,
+        axis: Axis,
+        spacing: f32,
+        panes: &BTreeMap<Pane, Constraints>,
+        bounds: Size,
+    ) -> Vec<(Split, Branch)> {
+        let Some(Node::Split { a, b, .. }) = self.find_split(split) else {
+            return self.same_axis_ancestors(split, axis);
+        };
+
+        let regions = self.split_regions_with_constraints(spacing, panes, bounds);
+        let position = |split: &Split| {
+            regions
+                .get(split)
+                .map_or(f32::INFINITY, |(axis, region, ratio)| {
+                    split_position(*axis, region, *ratio)
+                })
+        };
+
+        let mut after = b.axis_splits(axis);
+        let mut before = a.axis_splits(axis);
+        after.sort_by(|x, y| position(x).total_cmp(&position(y)));
+        before.sort_by(|x, y| position(y).total_cmp(&position(x)));
+
+        after
+            .into_iter()
+            .map(|split| (split, Branch::A))
+            .chain(before.into_iter().map(|split| (split, Branch::B)))
+            .chain(self.same_axis_ancestors(split, axis))
+            .collect()
+    }
+
+    fn find_split(&self, split: Split) -> Option<&Node> {
+        let Node::Split { id, a, b, .. } = self else {
+            return None;
+        };
+        if *id == split {
+            return Some(self);
+        }
+
+        a.find_split(split).or_else(|| b.find_split(split))
+    }
+
+    fn axis_splits(&self, axis: Axis) -> Vec<Split> {
+        let mut splits = Vec::new();
+        self.collect_axis_splits(axis, &mut splits);
+        splits
+    }
+
+    fn collect_axis_splits(&self, axis: Axis, splits: &mut Vec<Split>) {
+        let Node::Split {
+            id,
+            axis: split_axis,
+            a,
+            b,
+            ..
+        } = self
+        else {
+            return;
+        };
+        if *split_axis == axis {
+            splits.push(*id);
+        }
+        a.collect_axis_splits(axis, splits);
+        b.collect_axis_splits(axis, splits);
+    }
+
     fn same_axis_ancestors(&self, split: Split, axis: Axis) -> Vec<(Split, Branch)> {
         self.ancestors(split)
             .into_iter()
@@ -525,9 +601,8 @@ impl Node {
                     (fixed_branch, branch),
                     (Branch::A, Branch::B) | (Branch::B, Branch::A)
                 );
-                (crosses_fixed
-                    && self.opposite_has_resize_target(ancestor, branch, axis, panes))
-                .then_some(ancestor)
+                (crosses_fixed && self.opposite_has_resize_target(ancestor, branch, axis, panes))
+                    .then_some(ancestor)
             })
             .unwrap_or(split)
     }
@@ -571,14 +646,8 @@ impl Node {
 
     fn is_fixed(&self, axis: Axis, panes: &BTreeMap<Pane, Constraints>) -> bool {
         match self {
-            Node::Pane(pane) => panes
-                .get(pane)
-                .copied()
-                .unwrap_or_default()
-                .is_fixed(axis),
-            Node::Split { a, b, .. } => {
-                a.is_fixed(axis, panes) && b.is_fixed(axis, panes)
-            }
+            Node::Pane(pane) => panes.get(pane).copied().unwrap_or_default().is_fixed(axis),
+            Node::Split { a, b, .. } => a.is_fixed(axis, panes) && b.is_fixed(axis, panes),
         }
     }
 
@@ -1411,7 +1480,7 @@ mod tests {
     }
 
     #[test]
-    fn resize_adjacent_stops_at_the_adjacent_minimum() {
+    fn resize_adjacent_cascades_past_the_adjacent_minimum() {
         let mut node = Node::Split {
             id: OUTER,
             axis: Axis::Vertical,
@@ -1427,7 +1496,7 @@ mod tests {
         };
 
         assert!(node.resize_adjacent(OUTER, 0.2, 0.0, &constraints(), Size::new(900.0, 600.0)));
-        assert_eq!(vec![300.0, 100.0, 500.0], widths(&node));
+        assert_eq!(vec![100.0, 100.0, 700.0], widths(&node));
     }
 
     #[test]
@@ -1487,13 +1556,7 @@ mod tests {
             let before = node.pane_regions_with_constraints(0.0, &constraints, size);
             let boundary = rectangle_end(axis, &before[&Pane(1)]);
 
-            assert!(node.resize_adjacent_at(
-                INNER,
-                boundary - 300.0,
-                0.0,
-                &constraints,
-                size
-            ));
+            assert!(node.resize_adjacent_at(INNER, boundary - 300.0, 0.0, &constraints, size));
 
             let after = node.pane_regions_with_constraints(0.0, &constraints, size);
             assert_close(100.0, rectangle_extent(axis, &after[&Pane(1)]), name);
@@ -1581,7 +1644,7 @@ mod tests {
                     Constraints::new(Size::new(30.0, 0.0), Size::new(30.0, f32::INFINITY))
                 }
             };
-            let constraints = [
+            let constraints: BTreeMap<Pane, Constraints> = [
                 (Pane(0), expanded),
                 (Pane(1), rail),
                 (Pane(2), rail),
@@ -1593,11 +1656,8 @@ mod tests {
             let mut flexible_node = node.clone();
             let mut flexible_constraints = constraints.clone();
             let _ = flexible_constraints.insert(Pane(1), expanded);
-            let before = flexible_node.pane_regions_with_constraints(
-                0.0,
-                &flexible_constraints,
-                size,
-            );
+            let before =
+                flexible_node.pane_regions_with_constraints(0.0, &flexible_constraints, size);
             let boundary = rectangle_end(axis, &before[&Pane(0)]);
 
             assert!(flexible_node.resize_adjacent_at(
@@ -1608,11 +1668,8 @@ mod tests {
                 size
             ));
 
-            let after = flexible_node.pane_regions_with_constraints(
-                0.0,
-                &flexible_constraints,
-                size,
-            );
+            let after =
+                flexible_node.pane_regions_with_constraints(0.0, &flexible_constraints, size);
             assert_close(
                 rectangle_extent(axis, &before[&Pane(3)]),
                 rectangle_extent(axis, &after[&Pane(3)]),
@@ -1701,13 +1758,7 @@ mod tests {
             let before = node.pane_regions_with_constraints(0.0, &constraints, size);
             let boundary = rectangle_end(axis, &before[&Pane(0)]);
 
-            assert!(node.resize_adjacent_at(
-                INNER,
-                boundary - 100.0,
-                0.0,
-                &constraints,
-                size
-            ));
+            assert!(node.resize_adjacent_at(INNER, boundary - 100.0, 0.0, &constraints, size));
 
             let after = node.pane_regions_with_constraints(0.0, &constraints, size);
             assert_close(
@@ -1805,6 +1856,148 @@ mod tests {
                 );
                 assert_close(30.0, rectangle_extent(axis, &after[&Pane(1)]), name);
             }
+        }
+    }
+
+    #[test]
+    fn resize_adjacent_stops_at_the_first_flexible_pane() {
+        let size = Size::new(1000.0, 600.0);
+        let mut node = Node::Split {
+            id: Split(2),
+            axis: Axis::Vertical,
+            ratio: 0.75,
+            a: Box::new(Node::Split {
+                id: OUTER,
+                axis: Axis::Vertical,
+                ratio: 350.0 / 750.0,
+                a: Box::new(Node::Split {
+                    id: INNER,
+                    axis: Axis::Vertical,
+                    ratio: 250.0 / 350.0,
+                    a: Box::new(Node::Pane(Pane(0))),
+                    b: Box::new(Node::Pane(Pane(1))),
+                }),
+                b: Box::new(Node::Pane(Pane(2))),
+            }),
+            b: Box::new(Node::Pane(Pane(3))),
+        };
+        let constraints = constraints_for(4);
+        let before = node.pane_regions_with_constraints(0.0, &constraints, size);
+        assert_eq!(
+            vec![250.0, 100.0, 400.0, 250.0],
+            (0..4).map(|id| before[&Pane(id)].width).collect::<Vec<_>>()
+        );
+
+        let boundary = rectangle_end(Axis::Vertical, &before[&Pane(0)]);
+        assert!(node.resize_adjacent_at(INNER, boundary + 100.0, 0.0, &constraints, size));
+
+        let after = node.pane_regions_with_constraints(0.0, &constraints, size);
+        for (id, expected) in [(0, 350.0), (1, 100.0), (2, 300.0), (3, 250.0)] {
+            assert_close(expected, after[&Pane(id)].width, &format!("Pane {id}"));
+        }
+    }
+
+    #[test]
+    fn resize_adjacent_stops_at_a_flexible_perpendicular_subtree() {
+        let size = Size::new(1000.0, 600.0);
+        let mut node = Node::Split {
+            id: Split(3),
+            axis: Axis::Vertical,
+            ratio: 0.75,
+            a: Box::new(Node::Split {
+                id: OUTER,
+                axis: Axis::Vertical,
+                ratio: 350.0 / 750.0,
+                a: Box::new(Node::Split {
+                    id: INNER,
+                    axis: Axis::Vertical,
+                    ratio: 250.0 / 350.0,
+                    a: Box::new(Node::Pane(Pane(0))),
+                    b: Box::new(Node::Pane(Pane(1))),
+                }),
+                b: Box::new(Node::Split {
+                    id: Split(2),
+                    axis: Axis::Horizontal,
+                    ratio: 0.7,
+                    a: Box::new(Node::Pane(Pane(2))),
+                    b: Box::new(Node::Pane(Pane(4))),
+                }),
+            }),
+            b: Box::new(Node::Pane(Pane(3))),
+        };
+        let constraints: BTreeMap<Pane, Constraints> = [0, 1, 2, 3, 4]
+            .into_iter()
+            .map(|id| (Pane(id), Constraints::minimum(Size::new(100.0, 0.0))))
+            .collect();
+        let before = node.pane_regions_with_constraints(0.0, &constraints, size);
+        assert_eq!(
+            vec![250.0, 100.0, 400.0, 250.0, 400.0],
+            (0..5).map(|id| before[&Pane(id)].width).collect::<Vec<_>>()
+        );
+
+        let boundary = rectangle_end(Axis::Vertical, &before[&Pane(0)]);
+        assert!(node.resize_adjacent_at(INNER, boundary + 100.0, 0.0, &constraints, size));
+
+        let after = node.pane_regions_with_constraints(0.0, &constraints, size);
+        for (id, expected) in [(0, 350.0), (1, 100.0), (2, 300.0), (3, 250.0), (4, 300.0)] {
+            assert_close(expected, after[&Pane(id)].width, &format!("Pane {id}"));
+        }
+    }
+
+    #[test]
+    fn resize_adjacent_pushes_the_next_pane_inside_a_perpendicular_subtree() {
+        const AGENT: Pane = Pane(0);
+        const FILES: Pane = Pane(1);
+        const DIFF: Pane = Pane(2);
+        const TERMINAL: Pane = Pane(3);
+        const PREVIEW: Pane = Pane(4);
+
+        let size = Size::new(1350.0, 900.0);
+        let mut node = Node::Split {
+            id: Split(3),
+            axis: Axis::Vertical,
+            ratio: 950.0 / 1350.0,
+            a: Box::new(Node::Split {
+                id: OUTER,
+                axis: Axis::Vertical,
+                ratio: 300.0 / 950.0,
+                a: Box::new(Node::Pane(AGENT)),
+                b: Box::new(Node::Split {
+                    id: Split(2),
+                    axis: Axis::Horizontal,
+                    ratio: 0.7,
+                    a: Box::new(Node::Split {
+                        id: INNER,
+                        axis: Axis::Vertical,
+                        ratio: 300.0 / 650.0,
+                        a: Box::new(Node::Pane(FILES)),
+                        b: Box::new(Node::Pane(DIFF)),
+                    }),
+                    b: Box::new(Node::Pane(TERMINAL)),
+                }),
+            }),
+            b: Box::new(Node::Pane(PREVIEW)),
+        };
+        let constraints: BTreeMap<Pane, Constraints> = (0..5)
+            .map(|id| (Pane(id), Constraints::minimum(Size::new(300.0, 0.0))))
+            .collect();
+        let before = node.pane_regions_with_constraints(0.0, &constraints, size);
+        assert_eq!(
+            vec![300.0, 300.0, 350.0, 650.0, 400.0],
+            (0..5).map(|id| before[&Pane(id)].width).collect::<Vec<_>>()
+        );
+
+        let boundary = rectangle_end(Axis::Vertical, &before[&AGENT]);
+        assert!(node.resize_adjacent_at(OUTER, boundary + 30.0, 0.0, &constraints, size));
+
+        let after = node.pane_regions_with_constraints(0.0, &constraints, size);
+        for (pane, expected, name) in [
+            (AGENT, 330.0, "Agent"),
+            (FILES, 300.0, "Files"),
+            (DIFF, 320.0, "Diff"),
+            (PREVIEW, 400.0, "Preview"),
+        ] {
+            assert_close(expected, after[&pane].width, name);
         }
     }
 

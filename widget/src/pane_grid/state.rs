@@ -288,9 +288,10 @@ impl<T> State<T> {
     /// Resizes only the panes adjacent to the provided split.
     ///
     /// Unlike [`Self::resize`], nested panes outside the dragged boundary keep
-    /// their current size. The boundary stops when an adjacent pane reaches
-    /// its constraints, and passes through panes whose minimum and maximum
-    /// sizes match on the resize axis.
+    /// their current size for as long as the adjacent panes can absorb the
+    /// drag. Once an adjacent pane reaches its constraints the boundary
+    /// carries on into the next pane along the axis, and it passes straight
+    /// through panes whose minimum and maximum sizes match on the resize axis.
     pub fn resize_adjacent(
         &mut self,
         event: ResizeEvent,
