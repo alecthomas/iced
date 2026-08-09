@@ -451,6 +451,14 @@ where
     }
 }
 
+enum Shaped {
+    Ready,
+    /// Cold, but a previous shape exists — keep drawing it.
+    Stale,
+    /// Cold with nothing to show; lay out at this estimated size.
+    Estimated(Size),
+}
+
 /// Sizes a cold deferred paragraph from a character-count heuristic; the
 /// real layout replaces it when the worker's shape lands.
 fn estimate_spans<Link, Font>(
@@ -524,27 +532,35 @@ where
         let shape = |state: &mut State<Link, Renderer::Paragraph>| {
             if !deferred {
                 state.paragraph = Renderer::Paragraph::with_spans(text_with_spans());
-                return None;
+                return Shaped::Ready;
             }
             match Renderer::Paragraph::try_with_spans(text_with_spans()) {
                 Some(paragraph) => {
                     state.paragraph = paragraph;
-                    None
+                    Shaped::Ready
                 }
-                // Cold: a default paragraph fails `compare` on the next
-                // layout, so the lookup retries until the worker fills it.
+                // Streamed updates keep drawing the previous shape until
+                // the worker fills the new one, so text never blinks.
+                None if !state.spans.is_empty() => Shaped::Stale,
                 None => {
                     state.paragraph = Renderer::Paragraph::default();
-                    Some(estimate_spans(spans, bounds, size, line_height))
+                    Shaped::Estimated(estimate_spans(spans, bounds, size, line_height))
                 }
             }
         };
 
         if state.spans != spans {
-            let estimated = shape(state);
-            state.spans = spans.iter().cloned().map(Span::to_static).collect();
-            if let Some(estimated) = estimated {
-                return estimated;
+            match shape(state) {
+                Shaped::Ready => {
+                    state.spans = spans.iter().cloned().map(Span::to_static).collect();
+                }
+                // Keeping the old spans makes the next layout retry the
+                // lookup for the new content.
+                Shaped::Stale => {}
+                Shaped::Estimated(estimated) => {
+                    state.spans = spans.iter().cloned().map(Span::to_static).collect();
+                    return estimated;
+                }
             }
         } else {
             match state.paragraph.compare(core::Text {
@@ -565,7 +581,7 @@ where
                     state.paragraph.resize(bounds);
                 }
                 core::text::Difference::Shape => {
-                    if let Some(estimated) = shape(state) {
+                    if let Shaped::Estimated(estimated) = shape(state) {
                         return estimated;
                     }
                 }
