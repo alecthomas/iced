@@ -6,6 +6,7 @@ use crate::core::renderer;
 use crate::core::touch;
 use crate::core::widget::{Operation, Tree, tree};
 use crate::core::{Element, Event, Layout, Length, Point, Rectangle, Shell, Size, Vector, Widget};
+use crate::scroll_latch;
 
 /// Emit messages on mouse events.
 pub struct MouseArea<'a, Message, Theme = crate::Theme, Renderer = crate::Renderer> {
@@ -137,6 +138,7 @@ struct State {
     cursor_position: Option<Point>,
     previous_click: Option<mouse::Click>,
     pressed: Pressed,
+    latch: scroll_latch::Id,
 }
 
 /// The buttons whose press this area received, so that a release can be
@@ -406,6 +408,19 @@ fn update<Message: Clone, Theme, Renderer>(
         return;
     }
 
+    // Scroll ownership outranks hovering, so this precedes the cursor check.
+    if let Event::Mouse(mouse::Event::WheelScrolled { delta }) = event
+        && let Some(on_scroll) = widget.on_scroll.as_ref()
+    {
+        if scroll_latch::may_act(state.latch, cursor.is_over(bounds)) {
+            scroll_latch::claim(state.latch);
+            shell.publish(on_scroll(*delta));
+            shell.capture_event();
+        }
+
+        return;
+    }
+
     if !cursor.is_over(layout.bounds()) {
         return;
     }
@@ -450,12 +465,6 @@ fn update<Message: Clone, Theme, Renderer>(
 
             if let Some(message) = widget.on_middle_press.as_ref() {
                 shell.publish(message.clone());
-                shell.capture_event();
-            }
-        }
-        Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
-            if let Some(on_scroll) = widget.on_scroll.as_ref() {
-                shell.publish(on_scroll(*delta));
                 shell.capture_event();
             }
         }

@@ -38,6 +38,7 @@ use crate::core::{
     self, Background, Color, Element, Event, InputMethod, Layout, Length, Padding, Pixels, Point,
     Rectangle, Shadow, Shell, Size, Theme, Vector, Widget,
 };
+use crate::scroll_latch;
 
 pub use operation::scrollable::{AbsoluteOffset, RelativeOffset};
 
@@ -775,7 +776,7 @@ where
 
             match event {
                 Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
-                    if cursor_over_scrollable.is_none() {
+                    if !scroll_latch::may_act(state.latch, cursor_over_scrollable.is_some()) {
                         return;
                     }
 
@@ -808,6 +809,10 @@ where
                         notify_scroll(state, &self.on_scroll, bounds, content_bounds, shell);
 
                     let in_transaction = state.last_scrolled.is_some();
+
+                    if has_scrolled || in_transaction || scroll_latch::owns(state.latch) {
+                        scroll_latch::claim(state.latch);
+                    }
 
                     if has_scrolled || in_transaction {
                         shell.capture_event();
@@ -1509,6 +1514,7 @@ struct State {
     /// Set by silent programmatic scrolls: the next redraw records the
     /// viewport as notified without publishing `on_scroll`.
     notify_suppressed: bool,
+    latch: scroll_latch::Id,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1536,6 +1542,7 @@ impl Default for State {
             is_scrollbar_visible: true,
             last_status: None,
             notify_suppressed: false,
+            latch: scroll_latch::Id::default(),
         }
     }
 }

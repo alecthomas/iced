@@ -14,6 +14,7 @@ mod column;
 mod mouse_area;
 mod pin;
 mod responsive;
+mod scroll_latch;
 mod stack;
 mod themer;
 
