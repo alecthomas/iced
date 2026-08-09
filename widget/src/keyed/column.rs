@@ -199,16 +199,28 @@ where
 
         let state = state.downcast_mut::<State<Key>>();
 
-        tree::diff_children_custom_with_search(
-            children,
-            &mut self.children,
-            |tree, child| child.as_widget_mut().diff(tree),
-            |index| {
-                self.keys.get(index).or_else(|| self.keys.last()).copied()
-                    != Some(state.keys[index])
-            },
-            |child| Tree::new(child.as_widget()),
-        );
+        // Trees must follow their keys: positional pairing hands every
+        // slot's state to a neighbor when a windowed list shifts by one.
+        let mut previous: Vec<Option<Tree>> =
+            std::mem::take(children).into_iter().map(Some).collect();
+        *children = self
+            .keys
+            .iter()
+            .zip(&mut self.children)
+            .map(|(key, child)| {
+                let inherited = state
+                    .keys
+                    .iter()
+                    .position(|previous_key| previous_key == key)
+                    .and_then(|index| {
+                        previous.get_mut(index).and_then(Option::take)
+                    });
+                let mut tree = inherited
+                    .unwrap_or_else(|| Tree::new(child.as_widget()));
+                child.as_widget_mut().diff(&mut tree);
+                tree
+            })
+            .collect();
 
         if state.keys != self.keys {
             state.keys.clone_from(&self.keys);
@@ -366,5 +378,86 @@ where
 {
     fn from(column: Column<'a, Key, Message, Theme, Renderer>) -> Self {
         Self::new(column)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::layout::{Limits, Node};
+    use crate::core::widget::tree;
+    use crate::core::{Theme, mouse};
+
+    /// Carries its construction value as widget state, so a test can tell
+    /// an inherited tree from a freshly created one.
+    struct Marker(u32);
+
+    impl<Message> Widget<Message, Theme, ()> for Marker {
+        fn tag(&self) -> tree::Tag {
+            tree::Tag::of::<u32>()
+        }
+
+        fn state(&self) -> tree::State {
+            tree::State::new(self.0)
+        }
+
+        fn size(&self) -> Size<Length> {
+            Size::new(Length::Shrink, Length::Shrink)
+        }
+
+        fn layout(
+            &mut self,
+            _tree: &mut Tree,
+            _renderer: &(),
+            _limits: &Limits,
+        ) -> Node {
+            Node::new(Size::ZERO)
+        }
+
+        fn draw(
+            &self,
+            _tree: &Tree,
+            _renderer: &mut (),
+            _theme: &Theme,
+            _style: &renderer::Style,
+            _layout: Layout<'_>,
+            _cursor: mouse::Cursor,
+            _viewport: &Rectangle,
+        ) {
+        }
+    }
+
+    fn column<'a>(
+        children: impl IntoIterator<Item = (usize, u32)>,
+    ) -> Column<'a, usize, (), Theme, ()> {
+        Column::with_children(
+            children
+                .into_iter()
+                .map(|(key, value)| (key, Element::new(Marker(value)))),
+        )
+    }
+
+    fn states(tree: &Tree) -> Vec<u32> {
+        tree.children
+            .iter()
+            .map(|child| *child.state.downcast_ref::<u32>())
+            .collect()
+    }
+
+    /// A windowed list shifting by one produces an equal-length child
+    /// list with shifted keys; every tree must follow its key.
+    #[test]
+    fn diff_moves_trees_with_their_keys() {
+        let mut initial = column([(1, 1), (2, 2), (3, 3)]);
+        let mut tree = Tree::empty();
+        tree.state = Widget::<(), Theme, ()>::state(&initial);
+        Widget::<(), Theme, ()>::diff(&mut initial, &mut tree);
+        assert_eq!(vec![1, 2, 3], states(&tree));
+
+        // Shift the window: key 1 leaves, key 4 enters, same length.
+        let mut shifted = column([(2, 9), (3, 9), (4, 4)]);
+        Widget::<(), Theme, ()>::diff(&mut shifted, &mut tree);
+
+        assert_eq!(vec![2, 3, 4], states(&tree));
     }
 }
