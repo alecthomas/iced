@@ -64,6 +64,12 @@ impl Paragraph {
     fn internal(&self) -> &Arc<Internal> {
         &self.0
     }
+
+    /// Distinguishes a shared cache hit from an equal re-shape.
+    #[cfg(test)]
+    pub(crate) fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
 }
 
 impl core::text::Paragraph for Paragraph {
@@ -75,63 +81,9 @@ impl core::text::Paragraph for Paragraph {
             return hit;
         }
 
-        log::trace!("Allocating plain paragraph: {}", text.content);
-
         let mut font_system = text::font_system().write().expect("Write font system");
-
-        let (hint, hint_factor) = match text::hint_factor(text.size, text.hint_factor) {
-            Some(hint_factor) => (true, hint_factor),
-            _ => (false, 1.0),
-        };
-
-        let mut buffer = cosmic_text::Buffer::new(
-            font_system.raw(),
-            cosmic_text::Metrics::new(
-                f32::from(text.size) * hint_factor,
-                f32::from(text.line_height.to_absolute(text.size)) * hint_factor,
-            ),
-        );
-
-        if hint {
-            buffer.set_hinting(cosmic_text::Hinting::Enabled);
-        }
-
-        buffer.set_size(
-            Some(text.bounds.width * hint_factor),
-            Some(text.bounds.height * hint_factor),
-        );
-
-        buffer.set_wrap(text::to_wrap(text.wrapping));
-        buffer.set_ellipsize(text::to_ellipsize(
-            text.ellipsis,
-            text.bounds.height * hint_factor,
-        ));
-
-        buffer.set_text(
-            text.content,
-            &text::to_attributes(text.font),
-            text::to_shaping(text.shaping, text.content),
-            None,
-        );
-        buffer.shape_until_scroll(font_system.raw(), false);
-
-        let min_bounds = text::align(&mut buffer, font_system.raw(), text.align_x) / hint_factor;
-
-        let paragraph = Self(Arc::new(Internal {
-            buffer,
-            base_key,
-            hint,
-            hint_factor,
-            font: text.font,
-            align_x: text.align_x,
-            align_y: text.align_y,
-            shaping: text.shaping,
-            wrapping: text.wrapping,
-            ellipsis: text.ellipsis,
-            bounds: text.bounds,
-            min_bounds,
-            version: font_system.version(),
-        }));
+        let version = font_system.version();
+        let paragraph = shape_plain(font_system.raw(), version, &text, base_key);
         cache::insert(full_key(base_key, text.bounds), &paragraph);
         paragraph
     }
@@ -142,90 +94,9 @@ impl core::text::Paragraph for Paragraph {
             return hit;
         }
 
-        log::trace!("Allocating rich paragraph: {} spans", text.content.len());
-
         let mut font_system = text::font_system().write().expect("Write font system");
-
-        let (hint, hint_factor) = match text::hint_factor(text.size, text.hint_factor) {
-            Some(hint_factor) => (true, hint_factor),
-            _ => (false, 1.0),
-        };
-
-        let mut buffer = cosmic_text::Buffer::new(
-            font_system.raw(),
-            cosmic_text::Metrics::new(
-                f32::from(text.size) * hint_factor,
-                f32::from(text.line_height.to_absolute(text.size)) * hint_factor,
-            ),
-        );
-
-        if hint {
-            buffer.set_hinting(cosmic_text::Hinting::Enabled);
-        }
-
-        buffer.set_size(
-            Some(text.bounds.width * hint_factor),
-            Some(text.bounds.height * hint_factor),
-        );
-
-        buffer.set_wrap(text::to_wrap(text.wrapping));
-        buffer.set_ellipsize(text::to_ellipsize(
-            text.ellipsis,
-            text.bounds.height * hint_factor,
-        ));
-
-        buffer.set_rich_text(
-            text.content.iter().enumerate().map(|(i, span)| {
-                let attrs = text::to_attributes(span.font.unwrap_or(text.font));
-
-                let attrs = match (span.size, span.line_height) {
-                    (None, None) => attrs,
-                    _ => {
-                        let size = span.size.unwrap_or(text.size);
-
-                        attrs.metrics(cosmic_text::Metrics::new(
-                            f32::from(size) * hint_factor,
-                            f32::from(
-                                span.line_height
-                                    .unwrap_or(text.line_height)
-                                    .to_absolute(size),
-                            ) * hint_factor,
-                        ))
-                    }
-                };
-
-                let attrs = if let Some(color) = span.color {
-                    attrs.color(text::to_color(color))
-                } else {
-                    attrs
-                };
-
-                (span.text.as_ref(), attrs.metadata(i))
-            }),
-            &text::to_attributes(text.font),
-            cosmic_text::Shaping::Advanced,
-            None,
-        );
-
-        buffer.shape_until_scroll(font_system.raw(), false);
-
-        let min_bounds = text::align(&mut buffer, font_system.raw(), text.align_x) / hint_factor;
-
-        let paragraph = Self(Arc::new(Internal {
-            buffer,
-            base_key,
-            hint,
-            hint_factor,
-            font: text.font,
-            align_x: text.align_x,
-            align_y: text.align_y,
-            shaping: text.shaping,
-            wrapping: text.wrapping,
-            ellipsis: text.ellipsis,
-            bounds: text.bounds,
-            min_bounds,
-            version: font_system.version(),
-        }));
+        let version = font_system.version();
+        let paragraph = shape_spans(font_system.raw(), version, &text, base_key);
         cache::insert(full_key(base_key, text.bounds), &paragraph);
         paragraph
     }
@@ -475,7 +346,164 @@ impl Default for Paragraph {
     }
 }
 
-fn full_key(base_key: u64, bounds: Size) -> u64 {
+/// Shapes plain text with `font_system`; callable off the main thread
+/// with a private [`cosmic_text::FontSystem`].
+pub(crate) fn shape_plain(
+    font_system: &mut cosmic_text::FontSystem,
+    version: text::Version,
+    text: &Text<&str>,
+    base_key: u64,
+) -> Paragraph {
+    log::trace!("Allocating plain paragraph: {}", text.content);
+
+    let (hint, hint_factor) = match text::hint_factor(text.size, text.hint_factor) {
+        Some(hint_factor) => (true, hint_factor),
+        _ => (false, 1.0),
+    };
+
+    let mut buffer = cosmic_text::Buffer::new(
+        font_system,
+        cosmic_text::Metrics::new(
+            f32::from(text.size) * hint_factor,
+            f32::from(text.line_height.to_absolute(text.size)) * hint_factor,
+        ),
+    );
+
+    if hint {
+        buffer.set_hinting(cosmic_text::Hinting::Enabled);
+    }
+
+    buffer.set_size(
+        Some(text.bounds.width * hint_factor),
+        Some(text.bounds.height * hint_factor),
+    );
+
+    buffer.set_wrap(text::to_wrap(text.wrapping));
+    buffer.set_ellipsize(text::to_ellipsize(
+        text.ellipsis,
+        text.bounds.height * hint_factor,
+    ));
+
+    buffer.set_text(
+        text.content,
+        &text::to_attributes(text.font),
+        text::to_shaping(text.shaping, text.content),
+        None,
+    );
+    buffer.shape_until_scroll(font_system, false);
+
+    let min_bounds = text::align(&mut buffer, font_system, text.align_x) / hint_factor;
+
+    Paragraph(Arc::new(Internal {
+        buffer,
+        base_key,
+        hint,
+        hint_factor,
+        font: text.font,
+        align_x: text.align_x,
+        align_y: text.align_y,
+        shaping: text.shaping,
+        wrapping: text.wrapping,
+        ellipsis: text.ellipsis,
+        bounds: text.bounds,
+        min_bounds,
+        version,
+    }))
+}
+
+/// Shapes rich spans with `font_system`; callable off the main thread
+/// with a private [`cosmic_text::FontSystem`].
+pub(crate) fn shape_spans<Link>(
+    font_system: &mut cosmic_text::FontSystem,
+    version: text::Version,
+    text: &Text<&[Span<'_, Link>]>,
+    base_key: u64,
+) -> Paragraph {
+    log::trace!("Allocating rich paragraph: {} spans", text.content.len());
+
+    let (hint, hint_factor) = match text::hint_factor(text.size, text.hint_factor) {
+        Some(hint_factor) => (true, hint_factor),
+        _ => (false, 1.0),
+    };
+
+    let mut buffer = cosmic_text::Buffer::new(
+        font_system,
+        cosmic_text::Metrics::new(
+            f32::from(text.size) * hint_factor,
+            f32::from(text.line_height.to_absolute(text.size)) * hint_factor,
+        ),
+    );
+
+    if hint {
+        buffer.set_hinting(cosmic_text::Hinting::Enabled);
+    }
+
+    buffer.set_size(
+        Some(text.bounds.width * hint_factor),
+        Some(text.bounds.height * hint_factor),
+    );
+
+    buffer.set_wrap(text::to_wrap(text.wrapping));
+    buffer.set_ellipsize(text::to_ellipsize(
+        text.ellipsis,
+        text.bounds.height * hint_factor,
+    ));
+
+    buffer.set_rich_text(
+        text.content.iter().enumerate().map(|(i, span)| {
+            let attrs = text::to_attributes(span.font.unwrap_or(text.font));
+
+            let attrs = match (span.size, span.line_height) {
+                (None, None) => attrs,
+                _ => {
+                    let size = span.size.unwrap_or(text.size);
+
+                    attrs.metrics(cosmic_text::Metrics::new(
+                        f32::from(size) * hint_factor,
+                        f32::from(
+                            span.line_height
+                                .unwrap_or(text.line_height)
+                                .to_absolute(size),
+                        ) * hint_factor,
+                    ))
+                }
+            };
+
+            let attrs = if let Some(color) = span.color {
+                attrs.color(text::to_color(color))
+            } else {
+                attrs
+            };
+
+            (span.text.as_ref(), attrs.metadata(i))
+        }),
+        &text::to_attributes(text.font),
+        cosmic_text::Shaping::Advanced,
+        None,
+    );
+
+    buffer.shape_until_scroll(font_system, false);
+
+    let min_bounds = text::align(&mut buffer, font_system, text.align_x) / hint_factor;
+
+    Paragraph(Arc::new(Internal {
+        buffer,
+        base_key,
+        hint,
+        hint_factor,
+        font: text.font,
+        align_x: text.align_x,
+        align_y: text.align_y,
+        shaping: text.shaping,
+        wrapping: text.wrapping,
+        ellipsis: text.ellipsis,
+        bounds: text.bounds,
+        min_bounds,
+        version,
+    }))
+}
+
+pub(crate) fn full_key(base_key: u64, bounds: Size) -> u64 {
     let mut hasher = FxHasher::default();
     base_key.hash(&mut hasher);
     bounds.width.to_bits().hash(&mut hasher);
@@ -520,7 +548,7 @@ fn hash_color(hasher: &mut FxHasher, color: Option<crate::core::Color>) {
     }
 }
 
-fn spans_base_key<Link>(text: &Text<&[Span<'_, Link>]>) -> u64 {
+pub(crate) fn spans_base_key<Link>(text: &Text<&[Span<'_, Link>]>) -> u64 {
     let mut hasher = FxHasher::default();
     // Rich and plain keyspaces must not collide: identical content shapes
     // differently (span metadata, forced advanced shaping).
@@ -543,7 +571,7 @@ fn spans_base_key<Link>(text: &Text<&[Span<'_, Link>]>) -> u64 {
     hasher.finish()
 }
 
-fn text_base_key(text: &Text<&str>) -> u64 {
+pub(crate) fn text_base_key(text: &Text<&str>) -> u64 {
     let mut hasher = FxHasher::default();
     2u8.hash(&mut hasher);
     hash_common(&mut hasher, text);
@@ -553,11 +581,11 @@ fn text_base_key(text: &Text<&str>) -> u64 {
 
 /// Two-generation cache keying shaped paragraphs by content, so shaping
 /// survives widget-tree rebuilds instead of dying with positional state.
-mod cache {
+pub(crate) mod cache {
     use super::Paragraph;
     use crate::text;
 
-    use rustc_hash::FxHashMap;
+    use rustc_hash::{FxHashMap, FxHashSet};
     use std::sync::{LazyLock, Mutex};
     use std::time::{Duration, Instant};
 
@@ -570,6 +598,9 @@ mod cache {
     struct Generations {
         current: FxHashMap<u64, Paragraph>,
         previous: FxHashMap<u64, Paragraph>,
+        /// Keys queued for off-thread shaping; blocks duplicate queueing
+        /// while a cold paragraph is in flight.
+        pending: FxHashSet<u64>,
         epoch: u64,
         rotated: Instant,
     }
@@ -580,12 +611,15 @@ mod cache {
             self.rotated = Instant::now();
         }
 
-        /// Font loads invalidate every shaped run.
+        /// Font loads invalidate every shaped run, including queued ones:
+        /// the worker discards jobs from a stale epoch, so their keys must
+        /// re-queue rather than stay pending forever.
         fn flush_stale(&mut self) {
             let epoch = text::font_epoch();
             if epoch != self.epoch {
                 self.current.clear();
                 self.previous.clear();
+                self.pending.clear();
                 self.epoch = epoch;
             }
         }
@@ -597,12 +631,13 @@ mod cache {
         Mutex::new(Generations {
             current: FxHashMap::default(),
             previous: FxHashMap::default(),
+            pending: FxHashSet::default(),
             epoch: text::font_epoch(),
             rotated: Instant::now(),
         })
     });
 
-    pub(super) fn get(key: u64) -> Option<Paragraph> {
+    pub(crate) fn get(key: u64) -> Option<Paragraph> {
         let mut cache = CACHE.lock().expect("Lock paragraph cache");
         cache.flush_stale();
         if let Some(hit) = cache.current.get(&key) {
@@ -613,13 +648,25 @@ mod cache {
         Some(hit)
     }
 
-    pub(super) fn insert(key: u64, paragraph: &Paragraph) {
+    pub(crate) fn insert(key: u64, paragraph: &Paragraph) {
         let mut cache = CACHE.lock().expect("Lock paragraph cache");
         cache.flush_stale();
         if cache.current.len() >= GENERATION_CAP {
             cache.rotate();
         }
+        let _ = cache.pending.remove(&key);
         let _ = cache.current.insert(key, paragraph.clone());
+    }
+
+    /// Marks `key` as queued for off-thread shaping; false when a warm or
+    /// in-flight entry makes queueing redundant.
+    pub(crate) fn try_pend(key: u64) -> bool {
+        let mut cache = CACHE.lock().expect("Lock paragraph cache");
+        cache.flush_stale();
+        if cache.current.contains_key(&key) || cache.previous.contains_key(&key) {
+            return false;
+        }
+        cache.pending.insert(key)
     }
 
     pub(super) fn trim() {
@@ -724,10 +771,6 @@ mod tests {
     use super::*;
     use crate::core::text::Paragraph as _;
 
-    fn ptr_eq(a: &Paragraph, b: &Paragraph) -> bool {
-        Arc::ptr_eq(&a.0, &b.0)
-    }
-
     fn plain(content: &str, width: f32) -> Text<&str> {
         Text {
             content,
@@ -753,38 +796,35 @@ mod tests {
             .expect("Lock font mutations");
         let first = Paragraph::with_text(plain("cached paragraph", 320.0));
         let warm = Paragraph::with_text(plain("cached paragraph", 320.0));
-        assert!(ptr_eq(&first, &warm), "identical content must share");
+        assert!(first.ptr_eq(&warm), "identical content must share");
 
         let other = Paragraph::with_text(plain("different content", 320.0));
-        assert!(!ptr_eq(&first, &other), "distinct content must not share");
+        assert!(!first.ptr_eq(&other), "distinct content must not share");
 
         let narrow = Paragraph::with_text(plain("cached paragraph", 100.0));
-        assert!(!ptr_eq(&first, &narrow), "wrap width is part of identity");
+        assert!(!first.ptr_eq(&narrow), "wrap width is part of identity");
 
         let mut resized = narrow.clone();
         resized.resize(Size::new(320.0, f32::MAX));
         assert!(
-            ptr_eq(&first, &resized),
+            first.ptr_eq(&resized),
             "resize to a cached width must reuse the cached shape"
         );
 
         cache::rotate_now();
         cache::rotate_now();
         let cold = Paragraph::with_text(plain("cached paragraph", 320.0));
-        assert!(
-            !ptr_eq(&first, &cold),
-            "two untouched generations must evict"
-        );
+        assert!(!first.ptr_eq(&cold), "two untouched generations must evict");
 
         let before_bump = Paragraph::with_text(plain("cached paragraph", 320.0));
-        assert!(ptr_eq(&cold, &before_bump));
+        assert!(cold.ptr_eq(&before_bump));
         text::font_system()
             .write()
             .expect("Write font system")
             .load_font(std::borrow::Cow::Owned(Vec::new()));
         let after_bump = Paragraph::with_text(plain("cached paragraph", 320.0));
         assert!(
-            !ptr_eq(&cold, &after_bump),
+            !cold.ptr_eq(&after_bump),
             "a font-system version bump must flush the cache"
         );
     }

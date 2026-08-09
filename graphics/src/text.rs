@@ -2,6 +2,7 @@
 pub mod cache;
 pub mod editor;
 pub mod paragraph;
+pub mod shaper;
 
 pub use cache::Cache;
 pub use editor::Editor;
