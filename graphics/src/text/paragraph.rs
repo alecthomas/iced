@@ -101,6 +101,13 @@ impl core::text::Paragraph for Paragraph {
         paragraph
     }
 
+    fn try_with_spans<Link>(text: Text<&[Span<'_, Link>]>) -> Option<Self> {
+        match crate::text::shaper::lookup_spans(&text) {
+            crate::text::shaper::ParagraphLookup::Warm(paragraph) => Some(paragraph),
+            crate::text::shaper::ParagraphLookup::Pending => None,
+        }
+    }
+
     fn resize(&mut self, new_bounds: Size) {
         let base_key = self.0.base_key;
         // Bounds are part of the cache key, so a resize is a lookup under

@@ -16,6 +16,12 @@ pub trait Paragraph: Sized + Default {
     /// Creates a new [`Paragraph`] laid out with the given [`Text`].
     fn with_spans<Link>(text: Text<&[Span<'_, Link, Self::Font>], Self::Font>) -> Self;
 
+    /// Non-blocking [`with_spans`](Self::with_spans): `None` when the
+    /// renderer deferred shaping to a background worker.
+    fn try_with_spans<Link>(text: Text<&[Span<'_, Link, Self::Font>], Self::Font>) -> Option<Self> {
+        Some(Self::with_spans(text))
+    }
+
     /// Lays out the [`Paragraph`] with some new boundaries.
     fn resize(&mut self, new_bounds: Size);
 

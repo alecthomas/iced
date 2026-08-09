@@ -32,6 +32,7 @@ where
     class: Theme::Class<'a>,
     hovered_link: Option<usize>,
     on_link_click: Option<Box<dyn Fn(Link) -> Message + 'a>>,
+    deferred: bool,
 }
 
 impl<'a, Link, Message, Theme, Renderer> Rich<'a, Link, Message, Theme, Renderer>
@@ -56,6 +57,7 @@ where
             ellipsis: Ellipsis::default(),
             class: Theme::default(),
             hovered_link: None,
+            deferred: false,
             on_link_click: None,
         }
     }
@@ -119,6 +121,13 @@ where
     /// Sets the [`Wrapping`] strategy of the [`Rich`] text.
     pub fn wrapping(mut self, wrapping: Wrapping) -> Self {
         self.wrapping = wrapping;
+        self
+    }
+
+    /// Defers shaping to the renderer's background worker: while cold,
+    /// the paragraph lays out at an estimated size and draws nothing.
+    pub fn deferred(mut self, deferred: bool) -> Self {
+        self.deferred = deferred;
         self
     }
 
@@ -241,6 +250,7 @@ where
             self.align_y,
             self.wrapping,
             self.ellipsis,
+            self.deferred,
         )
     }
 
@@ -441,6 +451,32 @@ where
     }
 }
 
+/// Sizes a cold deferred paragraph from a character-count heuristic; the
+/// real layout replaces it when the worker's shape lands.
+fn estimate_spans<Link, Font>(
+    spans: &[Span<'_, Link, Font>],
+    bounds: Size,
+    size: Pixels,
+    line_height: LineHeight,
+) -> Size {
+    let line_height = f32::from(line_height.to_absolute(size));
+    let chars_per_line = (bounds.width / (f32::from(size) * 0.5)).max(1.0);
+    let mut lines = 0.0f32;
+    let mut current = 0.0f32;
+    for span in spans {
+        for character in span.text.chars() {
+            if character == '\n' {
+                lines += (current / chars_per_line).ceil().max(1.0);
+                current = 0.0;
+            } else {
+                current += 1.0;
+            }
+        }
+    }
+    lines += (current / chars_per_line).ceil().max(1.0);
+    Size::new(bounds.width, (lines * line_height).min(bounds.height))
+}
+
 fn underline_y(size: Pixels, line_height: Pixels, offset: Option<Pixels>) -> f32 {
     size.0 + (line_height.0 - size.0) / 2.0 + size.0 * 0.08 + offset.map_or(0.0, |offset| offset.0)
 }
@@ -459,6 +495,7 @@ fn layout<Link, Renderer>(
     align_y: alignment::Vertical,
     wrapping: Wrapping,
     ellipsis: Ellipsis,
+    deferred: bool,
 ) -> layout::Node
 where
     Link: Clone,
@@ -484,9 +521,31 @@ where
             hint_factor: renderer.hint_factor(),
         };
 
+        let shape = |state: &mut State<Link, Renderer::Paragraph>| {
+            if !deferred {
+                state.paragraph = Renderer::Paragraph::with_spans(text_with_spans());
+                return None;
+            }
+            match Renderer::Paragraph::try_with_spans(text_with_spans()) {
+                Some(paragraph) => {
+                    state.paragraph = paragraph;
+                    None
+                }
+                // Cold: a default paragraph fails `compare` on the next
+                // layout, so the lookup retries until the worker fills it.
+                None => {
+                    state.paragraph = Renderer::Paragraph::default();
+                    Some(estimate_spans(spans, bounds, size, line_height))
+                }
+            }
+        };
+
         if state.spans != spans {
-            state.paragraph = Renderer::Paragraph::with_spans(text_with_spans());
+            let estimated = shape(state);
             state.spans = spans.iter().cloned().map(Span::to_static).collect();
+            if let Some(estimated) = estimated {
+                return estimated;
+            }
         } else {
             match state.paragraph.compare(core::Text {
                 content: (),
@@ -506,7 +565,9 @@ where
                     state.paragraph.resize(bounds);
                 }
                 core::text::Difference::Shape => {
-                    state.paragraph = Renderer::Paragraph::with_spans(text_with_spans());
+                    if let Some(estimated) = shape(state) {
+                        return estimated;
+                    }
                 }
             }
         }
