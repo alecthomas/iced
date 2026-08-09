@@ -1691,9 +1691,23 @@ impl State {
         }
     }
 
-    /// Scroll by the provided [`AbsoluteOffset`].
+    /// Scroll by the provided [`AbsoluteOffset`], composing on the stored
+    /// offset so a transient content-shrink clamp is not double-counted.
     fn scroll_by(&mut self, offset: AbsoluteOffset, bounds: Rectangle, content_bounds: Rectangle) {
-        self.scroll(Vector::new(offset.x, offset.y), bounds, content_bounds);
+        let stored = |offset: Offset, viewport: f32, content: f32| match offset {
+            Offset::Absolute(absolute) => absolute,
+            Offset::Relative(percentage) => ((content - viewport) * percentage).max(0.0),
+        };
+
+        self.offset_y = Offset::Absolute(
+            (stored(self.offset_y, bounds.height, content_bounds.height) + offset.y).max(0.0),
+        );
+
+        if offset.x != 0.0 {
+            self.offset_x = Offset::Absolute(
+                (stored(self.offset_x, bounds.width, content_bounds.width) + offset.x).max(0.0),
+            );
+        }
     }
 
     /// Unsnaps the current scroll position, if snapped, given the bounds of the
