@@ -11,7 +11,7 @@ use crate::text::{self, paragraph};
 
 use std::borrow::Cow;
 use std::sync::mpsc::{Receiver, Sender};
-use std::sync::{LazyLock, Mutex, RwLock, mpsc};
+use std::sync::{LazyLock, Mutex, RwLock, atomic, mpsc};
 use std::thread;
 
 /// Result of a non-blocking paragraph lookup.
@@ -28,6 +28,19 @@ pub enum ParagraphLookup {
 pub fn set_notifier(notifier: impl Fn() + Send + Sync + 'static) {
     *NOTIFIER.write().expect("Write shaper notifier") = Some(Box::new(notifier));
 }
+
+/// Lookups resolved to [`ParagraphLookup::Pending`] so far. Sample it
+/// around a layout to tell a placeholder apart from a real measurement.
+pub fn pending_lookups() -> u64 {
+    PENDING_LOOKUPS.load(atomic::Ordering::Relaxed)
+}
+
+fn note_pending() -> ParagraphLookup {
+    let _ = PENDING_LOOKUPS.fetch_add(1, atomic::Ordering::Relaxed);
+    ParagraphLookup::Pending
+}
+
+static PENDING_LOOKUPS: atomic::AtomicU64 = atomic::AtomicU64::new(0);
 
 /// Non-blocking cache lookup for plain text.
 pub fn lookup_plain(text: &Text<&str>) -> ParagraphLookup {
@@ -52,7 +65,7 @@ pub fn lookup_plain(text: &Text<&str>) -> ParagraphLookup {
             epoch: text::font_epoch(),
         });
     }
-    ParagraphLookup::Pending
+    note_pending()
 }
 
 /// Non-blocking cache lookup for rich spans.
@@ -89,7 +102,7 @@ pub fn lookup_spans<Link>(text: &Text<&[Span<'_, Link>]>) -> ParagraphLookup {
             epoch: text::font_epoch(),
         });
     }
-    ParagraphLookup::Pending
+    note_pending()
 }
 
 static NOTIFIER: RwLock<Option<Box<dyn Fn() + Send + Sync>>> = RwLock::new(None);
