@@ -135,7 +135,7 @@ pub enum Action {
     /// Perform an [`Edit`].
     Edit(Edit),
     /// Click the [`Editor`] at the given [`Point`].
-    Click(Point),
+    Click(Point, mouse::click::Kind),
     /// Drag the mouse on the [`Editor`] to the given [`Point`].
     Drag(Point),
     /// Scroll the [`Editor`] a certain amount of lines.
@@ -167,8 +167,16 @@ pub enum Edit {
     Unindent,
     /// Delete the previous character.
     Backspace,
+    /// Delete the word before the cursor.
+    BackspaceWord,
+    /// Delete the line before the cursor.
+    BackspaceLine,
     /// Delete the next character.
     Delete,
+    /// Delete the word after the cursor.
+    DeleteWord,
+    /// Delete the line after the cursor.
+    DeleteLine,
     /// Undo the last change performed on the [`Editor`].
     Undo,
     /// Redo the last undone change on the [`Editor`].
@@ -308,7 +316,7 @@ pub struct State {
     focus: Option<Focus>,
     preedit: Option<input_method::Preedit>,
     last_click: Option<mouse::Click>,
-    drag_click: Option<mouse::click::Kind>,
+    is_dragging: bool,
     partial_scroll: f32,
 }
 
@@ -388,17 +396,14 @@ impl State {
                             self.last_click,
                         );
 
-                        let action = match click.kind() {
-                            mouse::click::Kind::Single => Action::Click(click.position()),
-                            mouse::click::Kind::Double => Action::SelectWord,
-                            mouse::click::Kind::Triple => Action::SelectLine,
-                        };
-
                         self.focus = Some(Focus::now());
                         self.last_click = Some(click);
-                        self.drag_click = Some(click.kind());
+                        self.is_dragging = true;
 
-                        Some(Update::Action(action))
+                        Some(Update::Action(Action::Click(
+                            click.position(),
+                            click.kind(),
+                        )))
                     } else if self.focus.is_some() {
                         self.focus = None;
 
@@ -408,19 +413,16 @@ impl State {
                     }
                 }
                 mouse::Event::ButtonReleased(mouse::Button::Left) => {
-                    self.drag_click = None;
+                    self.is_dragging = false;
 
                     Some(Update::Release)
                 }
-                mouse::Event::CursorMoved { .. } => match self.drag_click {
-                    Some(mouse::click::Kind::Single) => {
-                        let position =
-                            cursor.position_in(bounds)? - Vector::new(padding.left, padding.top);
+                mouse::Event::CursorMoved { .. } if self.is_dragging => {
+                    let position =
+                        cursor.position_in(bounds)? - Vector::new(padding.left, padding.top);
 
-                        Some(Update::Action(Action::Drag(position)))
-                    }
-                    _ => None,
-                },
+                    Some(Update::Action(Action::Drag(position)))
+                }
                 mouse::Event::WheelScrolled { delta } if cursor.is_over(bounds) => {
                     let bounds = editor.bounds();
 
@@ -497,7 +499,7 @@ impl State {
                     match binding {
                         Binding::Unfocus => {
                             state.focus = None;
-                            state.drag_click = None;
+                            state.is_dragging = false;
 
                             None
                         }
@@ -522,10 +524,14 @@ impl State {
                         Binding::SelectWord => Some(action(Action::SelectWord)),
                         Binding::SelectLine => Some(action(Action::SelectLine)),
                         Binding::SelectAll => Some(action(Action::SelectAll)),
-                        Binding::Insert(c) => Some(action(Action::Edit(Edit::Insert(c)))),
-                        Binding::Enter => Some(action(Action::Edit(Edit::Enter))),
-                        Binding::Backspace => Some(action(Action::Edit(Edit::Backspace))),
+                        Binding::Insert(c) => Some(edit(Edit::Insert(c))),
+                        Binding::Enter => Some(edit(Edit::Enter)),
+                        Binding::Backspace => Some(edit(Edit::Backspace)),
+                        Binding::BackspaceWord => Some(edit(Edit::BackspaceWord)),
+                        Binding::BackspaceLine => Some(edit(Edit::BackspaceLine)),
                         Binding::Delete => Some(action(Action::Edit(Edit::Delete))),
+                        Binding::DeleteWord => Some(edit(Edit::DeleteWord)),
+                        Binding::DeleteLine => Some(edit(Edit::DeleteLine)),
                         Binding::Sequence(sequence) => {
                             let updates: Vec<_> = sequence
                                 .into_iter()
@@ -752,8 +758,16 @@ pub enum Binding<Message> {
     Enter,
     /// Delete the previous character.
     Backspace,
+    /// Delete the word before the cursor.
+    BackspaceWord,
+    /// Delete the line before the cursor.
+    BackspaceLine,
     /// Delete the next character.
     Delete,
+    /// Delete the word after the cursor.
+    DeleteWord,
+    /// Delete the line after the cursor.
+    DeleteLine,
     /// A sequence of bindings to execute.
     Sequence(Vec<Self>),
     /// Produce the given message.
@@ -821,8 +835,8 @@ impl<Message> Binding<Message> {
             keyboard::Key::Named(key::Named::Enter) => Some(Self::Enter),
             keyboard::Key::Named(key::Named::Backspace) => Some(delete_by(
                 modifiers,
-                Motion::WordLeft,
-                Motion::Home,
+                Self::BackspaceWord,
+                Self::BackspaceLine,
                 Self::Backspace,
             )),
             keyboard::Key::Named(key::Named::Delete)
@@ -830,8 +844,8 @@ impl<Message> Binding<Message> {
             {
                 Some(delete_by(
                     modifiers,
-                    Motion::WordRight,
-                    Motion::End,
+                    Self::DeleteWord,
+                    Self::DeleteLine,
                     Self::Delete,
                 ))
             }
@@ -894,21 +908,22 @@ fn insertable_character(
     }
 }
 
+/// Native deletion granularity: macOS deletes to the line boundary with
+/// Command and to the word boundary with Option, while other platforms only
+/// bind word-wise deletion, to Control.
 fn delete_by<Message>(
     modifiers: keyboard::Modifiers,
-    word: Motion,
-    line: Motion,
+    word: Binding<Message>,
+    line: Binding<Message>,
     grapheme: Binding<Message>,
 ) -> Binding<Message> {
-    let motion = if modifiers.macos_command() {
+    if modifiers.macos_command() {
         line
     } else if modifiers.jump() {
         word
     } else {
-        return grapheme;
-    };
-
-    Binding::Sequence(vec![Binding::Select(motion), grapheme])
+        grapheme
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1129,19 +1144,19 @@ mod tests {
     fn word_and_line_deletion() {
         assert_eq!(
             named(key::Named::Backspace, keyboard::Modifiers::ALT),
-            kill(Motion::WordLeft, Binding::Backspace)
+            Some(Binding::BackspaceWord)
         );
         assert_eq!(
             named(key::Named::Backspace, keyboard::Modifiers::COMMAND),
-            kill(Motion::Home, Binding::Backspace)
+            Some(Binding::BackspaceLine)
         );
         assert_eq!(
             named(key::Named::Delete, keyboard::Modifiers::ALT),
-            kill(Motion::WordRight, Binding::Delete)
+            Some(Binding::DeleteWord)
         );
         assert_eq!(
             named(key::Named::Delete, keyboard::Modifiers::COMMAND),
-            kill(Motion::End, Binding::Delete)
+            Some(Binding::DeleteLine)
         );
     }
 
