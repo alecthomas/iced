@@ -1735,3 +1735,13 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod send_tests {
+    /// The app parses `Content` on a worker thread; keep it `Send`.
+    #[test]
+    fn test_content_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<super::Content>();
+    }
+}
