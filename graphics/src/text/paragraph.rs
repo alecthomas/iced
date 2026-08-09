@@ -5,7 +5,10 @@ use crate::core::text::{Alignment, Ellipsis, Hit, LineHeight, Shaping, Span, Tex
 use crate::core::{Font, Pixels, Point, Rectangle, Size};
 use crate::text;
 
+use rustc_hash::FxHasher;
+
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::sync::{self, Arc};
 
 /// A bunch of text.
@@ -15,6 +18,9 @@ pub struct Paragraph(Arc<Internal>);
 #[derive(Clone)]
 struct Internal {
     buffer: cosmic_text::Buffer,
+    /// Cache key of everything but `bounds`; lets `resize` re-key without
+    /// the original spans. Zero opts out (default/empty paragraphs).
+    base_key: u64,
     font: Font,
     shaping: Shaping,
     wrapping: Wrapping,
@@ -64,6 +70,11 @@ impl core::text::Paragraph for Paragraph {
     type Font = Font;
 
     fn with_text(text: Text<&str>) -> Self {
+        let base_key = text_base_key(&text);
+        if let Some(hit) = cache::get(full_key(base_key, text.bounds)) {
+            return hit;
+        }
+
         log::trace!("Allocating plain paragraph: {}", text.content);
 
         let mut font_system = text::font_system().write().expect("Write font system");
@@ -106,8 +117,9 @@ impl core::text::Paragraph for Paragraph {
 
         let min_bounds = text::align(&mut buffer, font_system.raw(), text.align_x) / hint_factor;
 
-        Self(Arc::new(Internal {
+        let paragraph = Self(Arc::new(Internal {
             buffer,
+            base_key,
             hint,
             hint_factor,
             font: text.font,
@@ -119,10 +131,17 @@ impl core::text::Paragraph for Paragraph {
             bounds: text.bounds,
             min_bounds,
             version: font_system.version(),
-        }))
+        }));
+        cache::insert(full_key(base_key, text.bounds), &paragraph);
+        paragraph
     }
 
     fn with_spans<Link>(text: Text<&[Span<'_, Link>]>) -> Self {
+        let base_key = spans_base_key(&text);
+        if let Some(hit) = cache::get(full_key(base_key, text.bounds)) {
+            return hit;
+        }
+
         log::trace!("Allocating rich paragraph: {} spans", text.content.len());
 
         let mut font_system = text::font_system().write().expect("Write font system");
@@ -192,8 +211,9 @@ impl core::text::Paragraph for Paragraph {
 
         let min_bounds = text::align(&mut buffer, font_system.raw(), text.align_x) / hint_factor;
 
-        Self(Arc::new(Internal {
+        let paragraph = Self(Arc::new(Internal {
             buffer,
+            base_key,
             hint,
             hint_factor,
             font: text.font,
@@ -205,10 +225,22 @@ impl core::text::Paragraph for Paragraph {
             bounds: text.bounds,
             min_bounds,
             version: font_system.version(),
-        }))
+        }));
+        cache::insert(full_key(base_key, text.bounds), &paragraph);
+        paragraph
     }
 
     fn resize(&mut self, new_bounds: Size) {
+        let base_key = self.0.base_key;
+        // Bounds are part of the cache key, so a resize is a lookup under
+        // the new bounds — oscillating widths re-shape nothing when warm.
+        if base_key != 0
+            && let Some(hit) = cache::get(full_key(base_key, new_bounds))
+        {
+            *self = hit;
+            return;
+        }
+
         let paragraph = Arc::make_mut(&mut self.0);
 
         let mut font_system = text::font_system().write().expect("Write font system");
@@ -226,6 +258,11 @@ impl core::text::Paragraph for Paragraph {
 
         paragraph.bounds = new_bounds;
         paragraph.min_bounds = min_bounds;
+
+        drop(font_system);
+        if base_key != 0 {
+            cache::insert(full_key(base_key, new_bounds), self);
+        }
     }
 
     fn compare(&self, text: Text<()>) -> core::text::Difference {
@@ -438,6 +475,172 @@ impl Default for Paragraph {
     }
 }
 
+fn full_key(base_key: u64, bounds: Size) -> u64 {
+    let mut hasher = FxHasher::default();
+    base_key.hash(&mut hasher);
+    bounds.width.to_bits().hash(&mut hasher);
+    bounds.height.to_bits().hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Hashes every shaping-relevant input of `text` except its content and
+/// bounds; content is hashed by the callers, bounds by [`full_key`].
+fn hash_common<Content>(hasher: &mut FxHasher, text: &Text<Content>) {
+    text.size.0.to_bits().hash(hasher);
+    text.line_height
+        .to_absolute(text.size)
+        .0
+        .to_bits()
+        .hash(hasher);
+    text.font.hash(hasher);
+    text.align_x.hash(hasher);
+    (text.align_y as u8).hash(hasher);
+    text.shaping.hash(hasher);
+    text.wrapping.hash(hasher);
+    text.ellipsis.hash(hasher);
+    match text::hint_factor(text.size, text.hint_factor) {
+        Some(factor) => {
+            1u8.hash(hasher);
+            factor.to_bits().hash(hasher);
+        }
+        None => 0u8.hash(hasher),
+    }
+}
+
+fn hash_color(hasher: &mut FxHasher, color: Option<crate::core::Color>) {
+    match color {
+        Some(color) => {
+            1u8.hash(hasher);
+            color.r.to_bits().hash(hasher);
+            color.g.to_bits().hash(hasher);
+            color.b.to_bits().hash(hasher);
+            color.a.to_bits().hash(hasher);
+        }
+        None => 0u8.hash(hasher),
+    }
+}
+
+fn spans_base_key<Link>(text: &Text<&[Span<'_, Link>]>) -> u64 {
+    let mut hasher = FxHasher::default();
+    // Rich and plain keyspaces must not collide: identical content shapes
+    // differently (span metadata, forced advanced shaping).
+    1u8.hash(&mut hasher);
+    hash_common(&mut hasher, text);
+    text.content.len().hash(&mut hasher);
+    for span in text.content {
+        span.text.hash(&mut hasher);
+        let size = span.size.unwrap_or(text.size);
+        size.0.to_bits().hash(&mut hasher);
+        span.line_height
+            .unwrap_or(text.line_height)
+            .to_absolute(size)
+            .0
+            .to_bits()
+            .hash(&mut hasher);
+        span.font.unwrap_or(text.font).hash(&mut hasher);
+        hash_color(&mut hasher, span.color);
+    }
+    hasher.finish()
+}
+
+fn text_base_key(text: &Text<&str>) -> u64 {
+    let mut hasher = FxHasher::default();
+    2u8.hash(&mut hasher);
+    hash_common(&mut hasher, text);
+    text.content.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Two-generation cache keying shaped paragraphs by content, so shaping
+/// survives widget-tree rebuilds instead of dying with positional state.
+mod cache {
+    use super::Paragraph;
+    use crate::text;
+
+    use rustc_hash::FxHashMap;
+    use std::sync::{LazyLock, Mutex};
+    use std::time::{Duration, Instant};
+
+    /// Generations rotate no faster than this, so paragraphs shaped
+    /// ahead of use (prewarming) survive until their first draw.
+    const ROTATION_INTERVAL: Duration = Duration::from_secs(1);
+    /// Early-rotation bound on a single generation.
+    const GENERATION_CAP: usize = 8192;
+
+    struct Generations {
+        current: FxHashMap<u64, Paragraph>,
+        previous: FxHashMap<u64, Paragraph>,
+        epoch: u64,
+        rotated: Instant,
+    }
+
+    impl Generations {
+        fn rotate(&mut self) {
+            self.previous = std::mem::take(&mut self.current);
+            self.rotated = Instant::now();
+        }
+
+        /// Font loads invalidate every shaped run.
+        fn flush_stale(&mut self) {
+            let epoch = text::font_epoch();
+            if epoch != self.epoch {
+                self.current.clear();
+                self.previous.clear();
+                self.epoch = epoch;
+            }
+        }
+    }
+
+    /// A `Paragraph` in a global `Mutex` is also the compile-time proof
+    /// that shaped buffers can cross threads.
+    static CACHE: LazyLock<Mutex<Generations>> = LazyLock::new(|| {
+        Mutex::new(Generations {
+            current: FxHashMap::default(),
+            previous: FxHashMap::default(),
+            epoch: text::font_epoch(),
+            rotated: Instant::now(),
+        })
+    });
+
+    pub(super) fn get(key: u64) -> Option<Paragraph> {
+        let mut cache = CACHE.lock().expect("Lock paragraph cache");
+        cache.flush_stale();
+        if let Some(hit) = cache.current.get(&key) {
+            return Some(hit.clone());
+        }
+        let hit = cache.previous.remove(&key)?;
+        let _ = cache.current.insert(key, hit.clone());
+        Some(hit)
+    }
+
+    pub(super) fn insert(key: u64, paragraph: &Paragraph) {
+        let mut cache = CACHE.lock().expect("Lock paragraph cache");
+        cache.flush_stale();
+        if cache.current.len() >= GENERATION_CAP {
+            cache.rotate();
+        }
+        let _ = cache.current.insert(key, paragraph.clone());
+    }
+
+    pub(super) fn trim() {
+        let mut cache = CACHE.lock().expect("Lock paragraph cache");
+        if cache.rotated.elapsed() >= ROTATION_INTERVAL {
+            cache.rotate();
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn rotate_now() {
+        CACHE.lock().expect("Lock paragraph cache").rotate();
+    }
+}
+
+/// Ages the paragraph cache; renderers call this once per frame and the
+/// internal interval gate turns that into a coarse recency window.
+pub fn trim_cache() {
+    cache::trim();
+}
+
 impl fmt::Debug for Paragraph {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let paragraph = self.internal();
@@ -472,6 +675,7 @@ impl Default for Internal {
                 font_size: 1.0,
                 line_height: 1.0,
             }),
+            base_key: 0,
             font: Font::default(),
             shaping: Shaping::default(),
             wrapping: Wrapping::default(),
@@ -512,5 +716,76 @@ impl PartialEq for Weak {
             (Some(p1), Some(p2)) => p1 == p2,
             _ => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::text::Paragraph as _;
+
+    fn ptr_eq(a: &Paragraph, b: &Paragraph) -> bool {
+        Arc::ptr_eq(&a.0, &b.0)
+    }
+
+    fn plain(content: &str, width: f32) -> Text<&str> {
+        Text {
+            content,
+            bounds: Size::new(width, f32::MAX),
+            size: Pixels(14.0),
+            line_height: LineHeight::default(),
+            font: Font::default(),
+            align_x: Alignment::Default,
+            align_y: alignment::Vertical::Top,
+            shaping: Shaping::Basic,
+            wrapping: Wrapping::default(),
+            ellipsis: Ellipsis::default(),
+            hint_factor: None,
+        }
+    }
+
+    // One test function: the cache and font-system version are process
+    // globals, and parallel tests would interleave rotations and flushes.
+    #[test]
+    fn test_cache_identity_eviction_and_invalidation() {
+        let _guard = crate::text::tests::FONT_MUTATION_GUARD
+            .lock()
+            .expect("Lock font mutations");
+        let first = Paragraph::with_text(plain("cached paragraph", 320.0));
+        let warm = Paragraph::with_text(plain("cached paragraph", 320.0));
+        assert!(ptr_eq(&first, &warm), "identical content must share");
+
+        let other = Paragraph::with_text(plain("different content", 320.0));
+        assert!(!ptr_eq(&first, &other), "distinct content must not share");
+
+        let narrow = Paragraph::with_text(plain("cached paragraph", 100.0));
+        assert!(!ptr_eq(&first, &narrow), "wrap width is part of identity");
+
+        let mut resized = narrow.clone();
+        resized.resize(Size::new(320.0, f32::MAX));
+        assert!(
+            ptr_eq(&first, &resized),
+            "resize to a cached width must reuse the cached shape"
+        );
+
+        cache::rotate_now();
+        cache::rotate_now();
+        let cold = Paragraph::with_text(plain("cached paragraph", 320.0));
+        assert!(
+            !ptr_eq(&first, &cold),
+            "two untouched generations must evict"
+        );
+
+        let before_bump = Paragraph::with_text(plain("cached paragraph", 320.0));
+        assert!(ptr_eq(&cold, &before_bump));
+        text::font_system()
+            .write()
+            .expect("Write font system")
+            .load_font(std::borrow::Cow::Owned(Vec::new()));
+        let after_bump = Paragraph::with_text(plain("cached paragraph", 320.0));
+        assert!(
+            !ptr_eq(&cold, &after_bump),
+            "a font-system version bump must flush the cache"
+        );
     }
 }

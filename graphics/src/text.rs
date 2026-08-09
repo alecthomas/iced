@@ -16,6 +16,7 @@ use crate::core::{Color, Pixels, Point, Rectangle, Size, Transformation};
 
 use std::borrow::Cow;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, RwLock, Weak};
 
 /// A text primitive.
@@ -193,7 +194,7 @@ impl FontSystem {
                 .map(|family| cosmic_text::Family::Name(family)),
         );
 
-        self.version = Version(self.version.0 + 1);
+        self.bump_version();
     }
 
     /// Loads a font from its bytes.
@@ -213,7 +214,7 @@ impl FontSystem {
                 bytes.into_owned(),
             )));
 
-        self.version = Version(self.version.0 + 1);
+        self.bump_version();
     }
 
     /// Returns an iterator over the family names of all font faces
@@ -232,6 +233,21 @@ impl FontSystem {
     pub fn version(&self) -> Version {
         self.version
     }
+
+    fn bump_version(&mut self) {
+        self.version = Version(self.version.0 + 1);
+        let _ = FONT_EPOCH.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+/// Counts font-set mutations across every [`FontSystem`] instance, so the
+/// paragraph cache can detect staleness without taking any lock.
+static FONT_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+/// The global font mutation count; moves whenever any [`FontSystem`]
+/// loads fonts or is reconfigured.
+pub fn font_epoch() -> u64 {
+    FONT_EPOCH.load(Ordering::Acquire)
 }
 
 /// A version number.
@@ -255,8 +271,13 @@ pub struct Raw {
 mod tests {
     use super::*;
 
+    /// Serializes tests that mutate global font state (the epoch counter
+    /// and the paragraph cache observe every instance).
+    pub(crate) static FONT_MUTATION_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn configure_sets_primary_font_families() {
+        let _guard = FONT_MUTATION_GUARD.lock().expect("Lock font mutations");
         let raw = cosmic_text::FontSystem::new_with_locale_and_db(
             "en-US".into(),
             cosmic_text::fontdb::Database::new(),

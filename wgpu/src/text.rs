@@ -424,6 +424,7 @@ impl State {
     pub fn trim(&mut self) {
         self.cache.trim();
         self.storage.trim();
+        crate::graphics::text::paragraph::trim_cache();
 
         self.prepare_layer = 0;
     }
