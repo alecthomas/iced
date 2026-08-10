@@ -1,12 +1,13 @@
-//! Click semantics of `mouse_area`: a release only completes a press the
-//! same area received.
-use iced::widget::{center, mouse_area, space};
+//! Click and scroll semantics of `mouse_area`: a release only completes a
+//! press the same area received, and scroll gestures respect the latch.
+use iced::widget::{center, mouse_area, row, space, stack};
 use iced::{Element, Event, Point, Size, mouse};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Message {
     Pressed,
     Released,
+    Scrolled,
 }
 
 const WINDOW: Size = Size::new(100.0, 100.0);
@@ -88,6 +89,65 @@ fn a_press_that_ends_outside_the_area_does_not_arm_the_next_release() {
         messages(
             area(40.0, 40.0),
             [(inside, press()), (outside, release()), (inside, release()),]
+        )
+    );
+}
+
+fn wheel() -> Event {
+    Event::Mouse(mouse::Event::WheelScrolled {
+        delta: mouse::ScrollDelta::Pixels { x: 0.0, y: -10.0 },
+    })
+}
+
+/// A capturing backdrop on the window's left half, a scroll consumer on
+/// its right half.
+fn wall_beside_consumer() -> Element<'static, Message> {
+    row![
+        mouse_area(space().width(50.0).height(100.0)).capture_scroll(),
+        mouse_area(space().width(50.0).height(100.0)).on_scroll(|_| Message::Scrolled),
+    ]
+    .into()
+}
+
+#[test]
+fn a_scroll_backdrop_walls_off_the_layer_beneath() {
+    let element: Element<'static, Message> = stack![
+        mouse_area(space().width(100.0).height(100.0)).on_scroll(|_| Message::Scrolled),
+        mouse_area(space().width(100.0).height(100.0)).capture_scroll(),
+    ]
+    .into();
+
+    assert_eq!(
+        Vec::<Message>::new(),
+        messages(element, [(Point::new(50.0, 50.0), wheel())])
+    );
+}
+
+#[test]
+fn a_scroll_backdrop_does_not_latch_the_gesture() {
+    // A latching backdrop would starve the consumer of the second event.
+    assert_eq!(
+        vec![Message::Scrolled],
+        messages(
+            wall_beside_consumer(),
+            [
+                (Point::new(25.0, 50.0), wheel()),
+                (Point::new(75.0, 50.0), wheel())
+            ]
+        )
+    );
+}
+
+#[test]
+fn a_scroll_consumer_keeps_the_gesture_over_a_backdrop() {
+    assert_eq!(
+        vec![Message::Scrolled, Message::Scrolled],
+        messages(
+            wall_beside_consumer(),
+            [
+                (Point::new(75.0, 50.0), wheel()),
+                (Point::new(25.0, 50.0), wheel())
+            ]
         )
     );
 }

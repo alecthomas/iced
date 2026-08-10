@@ -19,6 +19,7 @@ pub struct MouseArea<'a, Message, Theme = crate::Theme, Renderer = crate::Render
     on_middle_press: Option<Message>,
     on_middle_release: Option<Message>,
     on_scroll: Option<Box<dyn Fn(mouse::ScrollDelta) -> Message + 'a>>,
+    capture_scroll: bool,
     on_enter: Option<Message>,
     on_move: Option<Box<dyn Fn(Point) -> Message + 'a>>,
     on_exit: Option<Message>,
@@ -101,6 +102,14 @@ impl<'a, Message, Theme, Renderer> MouseArea<'a, Message, Theme, Renderer> {
         self
     }
 
+    /// Swallows unowned scroll events without latching the gesture, so an
+    /// overlay backdrop cannot starve a scrollable that declined one event.
+    #[must_use]
+    pub fn capture_scroll(mut self) -> Self {
+        self.capture_scroll = true;
+        self
+    }
+
     /// The message to emit when the mouse enters the area.
     #[must_use]
     pub fn on_enter(mut self, message: Message) -> Self {
@@ -163,6 +172,7 @@ impl<'a, Message, Theme, Renderer> MouseArea<'a, Message, Theme, Renderer> {
             on_middle_press: None,
             on_middle_release: None,
             on_scroll: None,
+            capture_scroll: false,
             on_enter: None,
             on_move: None,
             on_exit: None,
@@ -409,16 +419,28 @@ fn update<Message: Clone, Theme, Renderer>(
     }
 
     // Scroll ownership outranks hovering, so this precedes the cursor check.
-    if let Event::Mouse(mouse::Event::WheelScrolled { delta }) = event
-        && let Some(on_scroll) = widget.on_scroll.as_ref()
-    {
-        if scroll_latch::may_act(state.latch, cursor.is_over(bounds)) {
-            scroll_latch::claim(state.latch);
-            shell.publish(on_scroll(*delta));
-            shell.capture_event();
+    if let Event::Mouse(mouse::Event::WheelScrolled { delta }) = event {
+        if let Some(on_scroll) = widget.on_scroll.as_ref() {
+            if scroll_latch::may_act(state.latch, cursor.is_over(bounds)) {
+                scroll_latch::claim(state.latch);
+                shell.publish(on_scroll(*delta));
+                shell.capture_event();
+            }
+
+            return;
         }
 
-        return;
+        // A backdrop only walls off unowned events; the latch stays free so
+        // the scrollable that declined this event keeps the gesture's rest.
+        if widget.capture_scroll {
+            // The state's never-claimed latch makes may_act read as
+            // "no live owner and hovered".
+            if scroll_latch::may_act(state.latch, cursor.is_over(bounds)) {
+                shell.capture_event();
+            }
+
+            return;
+        }
     }
 
     if !cursor.is_over(layout.bounds()) {
