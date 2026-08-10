@@ -364,6 +364,46 @@ impl Span {
             }
         }
     }
+
+    fn is_blank(&self) -> bool {
+        match self {
+            Span::Standard { text, .. } => text.trim().is_empty(),
+            #[cfg(feature = "highlighter")]
+            Span::Highlight { text, .. } => text.trim().is_empty(),
+        }
+    }
+}
+
+/// An image met mid-block, and the spans holding its alt text.
+struct AltText {
+    alt: Range<usize>,
+    url: Uri,
+    title: String,
+}
+
+/// The item the spans of a finished block become. An image is a block
+/// only when alone in one; emitting it on sight cuts a shared line in two.
+fn block(spans: &mut Vec<Span>, images: &mut Vec<AltText>) -> Option<Item> {
+    if images.len() == 1 {
+        let alone = spans
+            .iter()
+            .enumerate()
+            .all(|(index, span)| images[0].alt.contains(&index) || span.is_blank());
+
+        if alone {
+            let AltText { alt, url, title } = images.remove(0);
+            let alt = Text::new(spans.drain(alt).collect());
+            spans.clear();
+
+            return Some(Item::Image { url, title, alt });
+        }
+    }
+
+    // Inline, an image is only its alt text: it keeps whatever link it
+    // was already under, and gains none of its own.
+    images.clear();
+
+    (!spans.is_empty()).then(|| Item::Paragraph(Text::new(mem::take(spans))))
 }
 
 /// The item of a list.
@@ -576,6 +616,7 @@ fn parse_with<'a>(
     let mut code_block = false;
     let mut link = None;
     let mut image = None;
+    let mut alt_texts: Vec<AltText> = Vec::new();
     let mut stack = Vec::new();
 
     #[cfg(feature = "highlighter")]
@@ -665,19 +706,13 @@ fn parse_with<'a>(
             pulldown_cmark::Tag::Image {
                 dest_url, title, ..
             } if !metadata => {
-                image = Some((dest_url.into_string(), title.into_string()));
+                image = Some((dest_url.into_string(), title.into_string(), spans.len()));
                 None
             }
             pulldown_cmark::Tag::List(first_item) if !metadata => {
-                let prev = if spans.is_empty() {
-                    None
-                } else {
-                    produce(
-                        state.borrow_mut(),
-                        &mut stack,
-                        Item::Paragraph(Text::new(spans.drain(..).collect())),
-                        source,
-                    )
+                let prev = match block(&mut spans, &mut alt_texts) {
+                    Some(item) => produce(state.borrow_mut(), &mut stack, item, source),
+                    None => None,
                 };
 
                 stack.push(Scope::List(List {
@@ -695,15 +730,9 @@ fn parse_with<'a>(
                 None
             }
             pulldown_cmark::Tag::BlockQuote(_kind) if !metadata => {
-                let prev = if spans.is_empty() {
-                    None
-                } else {
-                    produce(
-                        state.borrow_mut(),
-                        &mut stack,
-                        Item::Paragraph(Text::new(spans.drain(..).collect())),
-                        source,
-                    )
+                let prev = match block(&mut spans, &mut alt_texts) {
+                    Some(item) => produce(state.borrow_mut(), &mut stack, item, source),
+                    None => None,
                 };
 
                 stack.push(Scope::Quote(Vec::new()));
@@ -738,15 +767,9 @@ fn parse_with<'a>(
                 code_block = true;
                 code_language = (!language.is_empty()).then(|| language.into_string());
 
-                if spans.is_empty() {
-                    None
-                } else {
-                    produce(
-                        state.borrow_mut(),
-                        &mut stack,
-                        Item::Paragraph(Text::new(spans.drain(..).collect())),
-                        source,
-                    )
+                match block(&mut spans, &mut alt_texts) {
+                    Some(item) => produce(state.borrow_mut(), &mut stack, item, source),
+                    None => None,
                 }
             }
             pulldown_cmark::Tag::MetadataBlock(_) => {
@@ -778,12 +801,18 @@ fn parse_with<'a>(
             _ => None,
         },
         pulldown_cmark::Event::End(tag) => match tag {
-            pulldown_cmark::TagEnd::Heading(level) if !metadata => produce(
-                state.borrow_mut(),
-                &mut stack,
-                Item::Heading(level, Text::new(spans.drain(..).collect())),
-                source,
-            ),
+            pulldown_cmark::TagEnd::Heading(level) if !metadata => {
+                // A heading is one line by definition, so an image in it
+                // can only ever be its alt text.
+                alt_texts.clear();
+
+                produce(
+                    state.borrow_mut(),
+                    &mut stack,
+                    Item::Heading(level, Text::new(spans.drain(..).collect())),
+                    source,
+                )
+            }
             pulldown_cmark::TagEnd::Strong if !metadata => {
                 strong = false;
                 None
@@ -801,29 +830,15 @@ fn parse_with<'a>(
                 None
             }
             pulldown_cmark::TagEnd::Paragraph if !metadata => {
-                if spans.is_empty() {
-                    None
-                } else {
-                    produce(
-                        state.borrow_mut(),
-                        &mut stack,
-                        Item::Paragraph(Text::new(spans.drain(..).collect())),
-                        source,
-                    )
+                match block(&mut spans, &mut alt_texts) {
+                    Some(item) => produce(state.borrow_mut(), &mut stack, item, source),
+                    None => None,
                 }
             }
-            pulldown_cmark::TagEnd::Item if !metadata => {
-                if spans.is_empty() {
-                    None
-                } else {
-                    produce(
-                        state.borrow_mut(),
-                        &mut stack,
-                        Item::Paragraph(Text::new(spans.drain(..).collect())),
-                        source,
-                    )
-                }
-            }
+            pulldown_cmark::TagEnd::Item if !metadata => match block(&mut spans, &mut alt_texts) {
+                Some(item) => produce(state.borrow_mut(), &mut stack, item, source),
+                None => None,
+            },
             pulldown_cmark::TagEnd::List(_) if !metadata => {
                 let scope = stack.pop()?;
 
@@ -851,13 +866,18 @@ fn parse_with<'a>(
                 produce(state.borrow_mut(), &mut stack, Item::Quote(quote), source)
             }
             pulldown_cmark::TagEnd::Image if !metadata => {
-                let (url, title) = image.take()?;
-                let alt = Text::new(spans.drain(..).collect());
+                // Held until the block ends: only then is it known whether
+                // the image has the block to itself.
+                let (url, title, start) = image.take()?;
+                let _ = state.borrow_mut().images.insert(url.clone());
 
-                let state = state.borrow_mut();
-                let _ = state.images.insert(url.clone());
+                alt_texts.push(AltText {
+                    alt: start..spans.len(),
+                    url,
+                    title,
+                });
 
-                produce(state, &mut stack, Item::Image { url, title, alt }, source)
+                None
             }
             pulldown_cmark::TagEnd::CodeBlock if !metadata => {
                 code_block = false;
@@ -901,13 +921,8 @@ fn parse_with<'a>(
                 None
             }
             pulldown_cmark::TagEnd::TableCell => {
-                if !spans.is_empty() {
-                    let _ = produce(
-                        state.borrow_mut(),
-                        &mut stack,
-                        Item::Paragraph(Text::new(spans.drain(..).collect())),
-                        source,
-                    );
+                if let Some(item) = block(&mut spans, &mut alt_texts) {
+                    let _ = produce(state.borrow_mut(), &mut stack, item, source);
                 }
 
                 let Scope::Table {
@@ -1718,6 +1733,77 @@ mod tests {
         let light = Content::parse_with_highlighter(markdown, HighlighterTheme::InspiredGitHub);
 
         assert_ne!(colors(&dark), colors(&light));
+    }
+
+    #[test]
+    fn an_inline_image_does_not_split_its_line() {
+        fn text_of(item: &Item) -> String {
+            let (Item::Paragraph(text) | Item::Heading(_, text)) = item else {
+                panic!("expected text, got {item:?}");
+            };
+
+            text.spans(Style::from(Theme::Dark))
+                .iter()
+                .map(|span| span.text.as_ref())
+                .collect()
+        }
+
+        // A badge ahead of the sentence it labels: one line in, one out.
+        let items: Vec<_> = parse("![P2](https://img/p2.svg) Clear stale env ops").collect();
+        assert_eq!(1, items.len(), "{items:?}");
+        assert_eq!("P2 Clear stale env ops", text_of(&items[0]));
+
+        // Alt text is not a link of its own; only an image under one is.
+        let Item::Paragraph(text) = &items[0] else {
+            panic!("expected a paragraph");
+        };
+        assert!(
+            text.spans(Style::from(Theme::Dark))
+                .iter()
+                .all(|span| span.link.is_none())
+        );
+
+        let items: Vec<_> = parse("[![P2](https://img/p2.svg)](https://pr/1) after").collect();
+        let Some(Item::Paragraph(text)) = items.first() else {
+            panic!("expected a paragraph, got {items:?}");
+        };
+        assert_eq!(
+            vec![Some("https://pr/1".to_owned()), None],
+            text.spans(Style::from(Theme::Dark))
+                .iter()
+                .map(|span| span.link.clone())
+                .collect::<Vec<_>>()
+        );
+
+        let items: Vec<_> = parse("# ![P2](https://img/p2.svg) Title").collect();
+        assert_eq!(1, items.len(), "{items:?}");
+        assert_eq!("P2 Title", text_of(&items[0]));
+
+        // An image with the block to itself is still a block.
+        for markdown in [
+            "![Shot](shot.png)",
+            "![Shot](shot.png)\n",
+            "![](shot.png)",
+            "Before.\n\n![Shot](shot.png)\n\nAfter.",
+        ] {
+            assert!(
+                parse(markdown).any(|item| matches!(item, Item::Image { .. })),
+                "{markdown}"
+            );
+        }
+
+        // Text before it no longer ends up inside its alt text.
+        let items: Vec<_> = parse("Before.\n\n![Shot](shot.png)").collect();
+        let Some(Item::Image { alt, .. }) = items.last() else {
+            panic!("expected an image, got {items:?}");
+        };
+        assert_eq!(
+            "Shot",
+            alt.spans(Style::from(Theme::Dark))
+                .iter()
+                .map(|span| span.text.as_ref())
+                .collect::<String>()
+        );
     }
 
     #[test]
