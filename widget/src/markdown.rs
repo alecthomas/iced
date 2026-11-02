@@ -264,6 +264,13 @@ pub struct Row {
     cells: Vec<Vec<Item>>,
 }
 
+impl Row {
+    /// Returns the cells of the row.
+    pub fn cells(&self) -> &[Vec<Item>] {
+        &self.cells
+    }
+}
+
 /// A bunch of parsed Markdown text.
 #[derive(Debug, Clone)]
 pub struct Text {
