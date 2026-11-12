@@ -177,6 +177,9 @@ pub enum Shaping {
     ///
     /// This will be the default if the `advanced-shaping` feature is enabled.
     Advanced,
+    /// [`Advanced`](Self::Advanced) shaping that snaps every advance to whole
+    /// cells of the font's space width, so fallback glyphs keep a grid aligned.
+    Monospace,
 }
 
 impl Default for Shaping {

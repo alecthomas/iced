@@ -351,6 +351,13 @@ pub(crate) fn shape_plain(
         text.bounds.height * hint_factor,
     ));
 
+    set_monospace_width(
+        &mut buffer,
+        font_system,
+        text.shaping,
+        text.font,
+        f32::from(text.size) * hint_factor,
+    );
     buffer.set_text(
         text.content,
         &text::to_attributes(text.font),
@@ -416,6 +423,13 @@ pub(crate) fn shape_spans<Link>(
         text.bounds.height * hint_factor,
     ));
 
+    set_monospace_width(
+        &mut buffer,
+        font_system,
+        text.shaping,
+        text.font,
+        f32::from(text.size) * hint_factor,
+    );
     buffer.set_rich_text(
         text.content.iter().enumerate().map(|(i, span)| {
             let attrs = text::to_attributes(span.font.unwrap_or(text.font));
@@ -468,6 +482,36 @@ pub(crate) fn shape_spans<Link>(
         min_bounds,
         version,
     }))
+}
+
+fn set_monospace_width(
+    buffer: &mut cosmic_text::Buffer,
+    font_system: &mut cosmic_text::FontSystem,
+    shaping: Shaping,
+    font: Font,
+    size: f32,
+) {
+    if shaping != Shaping::Monospace {
+        return;
+    }
+    let mut probe = cosmic_text::Buffer::new(
+        font_system,
+        cosmic_text::Metrics::new(size, size),
+    );
+    probe.set_text(
+        " ",
+        &text::to_attributes(font),
+        cosmic_text::Shaping::Basic,
+        None,
+    );
+    probe.shape_until_scroll(font_system, false);
+    let width = probe
+        .layout_runs()
+        .next()
+        .and_then(|run| run.glyphs.first())
+        .map(|glyph| glyph.w)
+        .filter(|width| *width > 0.0);
+    buffer.set_monospace_width(width);
 }
 
 pub(crate) fn full_key(base_key: u64, bounds: Size) -> u64 {
@@ -795,4 +839,24 @@ mod tests {
             "a font-system version bump must flush the cache"
         );
     }
-}
+
+    #[test]
+    fn test_monospace_shaping_keeps_fallback_glyphs_on_the_grid() {
+        let _guard = crate::text::tests::FONT_MUTATION_GUARD
+            .lock()
+            .expect("Lock font mutations");
+        let glyph_x = |content| {
+            let paragraph = Paragraph::with_text(Text {
+                font: Font::MONOSPACE,
+                shaping: Shaping::Monospace,
+                ..plain(content, f32::INFINITY)
+            });
+            paragraph
+                .buffer()
+                .layout_runs()
+                .flat_map(|run| run.glyphs.iter().map(|glyph| glyph.x))
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(glyph_x("a ⣀▏x"), glyph_x("a b x"));
+    }}

@@ -457,7 +457,9 @@ pub fn to_shaping(shaping: Shaping, text: &str) -> cosmic_text::Shaping {
             }
         }
         Shaping::Basic => cosmic_text::Shaping::Basic,
-        Shaping::Advanced => cosmic_text::Shaping::Advanced,
+        Shaping::Advanced | Shaping::Monospace => {
+            cosmic_text::Shaping::Advanced
+        }
     }
 }
 
